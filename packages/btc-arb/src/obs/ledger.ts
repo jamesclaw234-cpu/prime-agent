@@ -155,6 +155,7 @@ export class Ledger {
 				quoteQty: decToString(fill.quoteQty),
 				avgPrice: decToString(fill.avgPrice),
 				status: fill.status,
+				expiryReason: fill.expiryReason,
 				orderId: fill.orderId,
 				clientOrderId: fill.clientOrderId,
 				latencyMs: fill.latencyMs,

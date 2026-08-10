@@ -195,7 +195,7 @@ export class MarketDataFeed {
 					if (!isCurrent()) return;
 					shard.lastMessageAt = this.now();
 					shard.messages++;
-					this.handleMessage(data);
+					this.handleMessage(data, shard.index);
 				},
 				onClose: (code, reason) => {
 					if (!isCurrent()) return;
@@ -275,7 +275,7 @@ export class MarketDataFeed {
 		shard.retryTimer.unref?.();
 	}
 
-	private handleMessage(data: string): void {
+	private handleMessage(data: string, shardIndex: number): void {
 		let parsed: unknown;
 		try {
 			parsed = JSON.parse(data);
@@ -293,6 +293,15 @@ export class MarketDataFeed {
 		const payload = envelope.data ?? (parsed as RawBookTickerStream);
 		if (!payload || typeof payload !== "object") {
 			if (envelope.id === undefined) this.parseErrors++;
+			return;
+		}
+
+		// The exchange warns before it goes away. Reconnecting on the notice rather than on the
+		// close that follows it is the difference between a handover and a gap in the feed.
+		if ((payload as { e?: string }).e === "serverShutdown") {
+			this.logger.warn("ws server shutdown announced, reconnecting early", { shard: shardIndex });
+			const shard = this.shards[shardIndex];
+			if (shard) this.forceReconnect(shard);
 			return;
 		}
 		if (typeof payload.s !== "string" || typeof payload.b !== "string" || typeof payload.a !== "string") {

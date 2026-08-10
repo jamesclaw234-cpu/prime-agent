@@ -23,6 +23,16 @@ export interface BinanceConfig {
 	/** Streams per WebSocket connection. Binance allows 1024; smaller shards reconnect faster. */
 	readonly streamsPerConnection: number;
 	readonly requestTimeoutMs: number;
+	/**
+	 * Timeout for order placement specifically.
+	 *
+	 * Binance's own matching-engine timeout is 10 seconds, after which it answers -1007 with
+	 * "execution status unknown". Aborting the request before then turns a slow-but-successful
+	 * order into an ambiguous one that halts the bot, so this must exceed 10s even though a
+	 * 10-second-old arbitrage order is worthless - the cycle deadline is what abandons the trade,
+	 * while this exists purely to learn the outcome.
+	 */
+	readonly orderTimeoutMs: number;
 }
 
 export interface UniverseConfig {
@@ -174,6 +184,7 @@ export const DEFAULT_CONFIG: ArbConfig = {
 		testnet: false,
 		streamsPerConnection: 64,
 		requestTimeoutMs: 5000,
+		orderTimeoutMs: 11_000,
 	},
 	universe: {
 		quoteAssets: ["USDT", "USDC", "FDUSD", "BTC", "ETH", "BNB"],
@@ -397,6 +408,12 @@ export function validateConfig(config: ArbConfig): void {
 	requirePositive(config.binance.recvWindowMs, "binance.recvWindowMs");
 	if (config.binance.recvWindowMs > 60_000) throw new ConfigError("binance.recvWindowMs cannot exceed 60000");
 	requirePositive(config.binance.requestTimeoutMs, "binance.requestTimeoutMs");
+	requirePositive(config.binance.orderTimeoutMs, "binance.orderTimeoutMs");
+	if (config.binance.orderTimeoutMs <= 10_000) {
+		throw new ConfigError(
+			"binance.orderTimeoutMs must exceed 10000: Binance's own processing timeout is 10s, and aborting sooner turns a slow order into an unknown one",
+		);
+	}
 	if (config.binance.streamsPerConnection < 1 || config.binance.streamsPerConnection > 200) {
 		throw new ConfigError("binance.streamsPerConnection must be between 1 and 200");
 	}

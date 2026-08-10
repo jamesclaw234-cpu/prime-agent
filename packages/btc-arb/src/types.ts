@@ -172,6 +172,8 @@ export interface LegFill {
 	readonly orderId: string;
 	readonly clientOrderId: string;
 	readonly status: string;
+	/** Binance's `expiryReason`, present only when the order expired. */
+	readonly expiryReason?: string;
 	readonly latencyMs: number;
 }
 

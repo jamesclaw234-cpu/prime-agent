@@ -138,7 +138,27 @@ export interface RawOrderResponse {
 	workingTime?: number;
 	selfTradePreventionMode?: string;
 	fills?: RawFill[];
+	/** Present only when the order expired. See `EXPIRY_REASON`. */
+	expiryReason?: string;
 }
+
+/**
+ * Why an order expired.
+ *
+ * `UNFILLED_IOC_QUANTITY_EXPIRED` is the ordinary outcome for a marketable IOC that lost the race
+ * and needs no attention. The others are diagnoses worth acting on: a price the exchange refused,
+ * or a book with nothing in it.
+ */
+export const EXPIRY_REASON = {
+	UNFILLED_IOC: "UNFILLED_IOC_QUANTITY_EXPIRED",
+	UNFILLED_FOK: "UNFILLED_FOK_ORDER_EXPIRED",
+	INSUFFICIENT_LIQUIDITY: "INSUFFICIENT_LIQUIDITY",
+	/** A taker order tried to execute outside the symbol's Price Range execution rule. */
+	PRICE_RANGE_EXCEEDED: "EXECUTION_RULE_PRICE_RANGE_EXCEEDED",
+	EXCHANGE_CANCELED: "EXCHANGE_CANCELED",
+	REJECTED: "REJECTED",
+	NONE: "NONE",
+} as const;
 
 export type RawOrderStatus =
 	| "NEW"
@@ -158,12 +178,22 @@ export const BINANCE_ERROR = {
 	/** Too many requests; the caller is being rate limited. */
 	TOO_MANY_REQUESTS: -1003,
 	/**
+	 * Unexpected response from the message bus.
+	 *
+	 * The docs state plainly: "Execution status unknown." Same hazard class as -1007.
+	 */
+	UNEXPECTED_RESP: -1006,
+	/**
 	 * Timed out waiting for the matching engine.
 	 *
 	 * On an order placement this is the dangerous case: the order may have executed. Reconcile by
-	 * client order id; never blindly retry.
+	 * client order id; never blindly retry. Binance's own processing timeout is 10 seconds.
 	 */
 	TIMEOUT: -1007,
+	/** Server overloaded and asking us to come back later; the request was not processed. */
+	SERVER_BUSY: -1008,
+	/** A matching-engine error message; shares its message table with -2010. */
+	ERROR_MSG_RECEIVED: -1010,
 	/** `timestamp` outside `recvWindow`, or ahead of server time. Resync the clock. */
 	INVALID_TIMESTAMP: -1021,
 	INVALID_SIGNATURE: -1022,
@@ -171,8 +201,15 @@ export const BINANCE_ERROR = {
 	MANDATORY_PARAM_MISSING: -1102,
 	/** Filter failure: LOT_SIZE, PRICE_FILTER, NOTIONAL, PERCENT_PRICE_BY_SIDE, etc. */
 	FILTER_FAILURE: -1013,
-	/** IP auto-banned for repeatedly exceeding rate limits. */
-	IP_BANNED: -1015,
+	/**
+	 * Too many new orders.
+	 *
+	 * This is the unfilled-order-count limit, which is tracked per account. An IP ban is a
+	 * different thing entirely: HTTP 418, or -1003 with an "IP banned until" message.
+	 */
+	TOO_MANY_ORDERS: -1015,
+	/** The service is shutting down and will not process the request. */
+	SERVICE_SHUTTING_DOWN: -1016,
 	BAD_PRECISION: -1111,
 	NEW_ORDER_REJECTED: -2010,
 	CANCEL_REJECTED: -2011,

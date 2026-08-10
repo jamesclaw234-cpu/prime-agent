@@ -252,3 +252,29 @@ describe("reconnection", () => {
 		expect(h.sockets).toHaveLength(1);
 	});
 });
+
+describe("server shutdown", () => {
+	it("reconnects on the shutdown notice rather than waiting for the close", () => {
+		// The exchange announces a shutdown before dropping the socket. Acting on the notice is the
+		// difference between a handover and a gap in the feed.
+		const h = harness(["BTCUSDT"]);
+		h.feed.start();
+		h.sockets[0].open();
+
+		h.sockets[0].message({ stream: "!serverShutdown", data: { e: "serverShutdown", E: 1770123456789 } });
+
+		expect(h.sockets[0].closed).toBe(true);
+		expect(h.sockets).toHaveLength(2);
+		// It is a known event, not a malformed frame.
+		expect(h.feed.stats().parseErrors).toBe(0);
+	});
+
+	it("handles the raw-stream form of the notice too", () => {
+		const h = harness(["BTCUSDT"]);
+		h.feed.start();
+		h.sockets[0].open();
+		h.sockets[0].message({ e: "serverShutdown", E: 1770123456789 });
+		expect(h.sockets).toHaveLength(2);
+		expect(h.feed.stats().parseErrors).toBe(0);
+	});
+});

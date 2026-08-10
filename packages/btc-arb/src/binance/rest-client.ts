@@ -41,6 +41,8 @@ export interface RestClientOptions {
 	readonly apiSecret?: string;
 	readonly recvWindowMs: number;
 	readonly timeoutMs: number;
+	/** Timeout for order placement. Falls back to `timeoutMs` when not supplied. */
+	readonly orderTimeoutMs?: number;
 	readonly limiter: RateLimiter;
 	readonly clock?: ServerClock;
 	readonly logger?: Logger;
@@ -68,8 +70,11 @@ export class BinanceApiError extends Error {
 			this.httpStatus === 418 ||
 			this.httpStatus >= 500 ||
 			this.code === BINANCE_ERROR.TOO_MANY_REQUESTS ||
+			this.code === BINANCE_ERROR.TOO_MANY_ORDERS ||
 			this.code === BINANCE_ERROR.DISCONNECTED ||
+			this.code === BINANCE_ERROR.SERVER_BUSY ||
 			this.code === BINANCE_ERROR.TIMEOUT ||
+			this.code === BINANCE_ERROR.UNEXPECTED_RESP ||
 			this.code === BINANCE_ERROR.UNKNOWN
 		);
 	}
@@ -85,6 +90,10 @@ export class BinanceApiError extends Error {
 		return (
 			this.code === BINANCE_ERROR.UNKNOWN ||
 			this.code === BINANCE_ERROR.TIMEOUT ||
+			// "An unexpected response was received from the message bus. Execution status unknown."
+			this.code === BINANCE_ERROR.UNEXPECTED_RESP ||
+			// The docs are explicit that a 5xx must not be treated as a failure: the execution
+			// status is unknown and could have been a success.
 			this.httpStatus >= 500 ||
 			this.httpStatus === 0
 		);
@@ -115,6 +124,10 @@ export interface NewOrderParams {
 }
 
 type QueryValue = string | number | boolean | undefined;
+
+/** `X-MBX-USED-WEIGHT-1M`, `X-MBX-ORDER-COUNT-10S`, and so on. */
+const RATE_HEADER = /^x-mbx-(used-weight|order-count)-(\d+)([smhd])$/i;
+const INTERVAL_MS: Record<string, number> = { s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000 };
 
 /**
  * Signed client for the Binance Spot REST API.
@@ -161,7 +174,7 @@ export class BinanceRestClient {
 		path: string,
 		params: Readonly<Record<string, QueryValue>>,
 		budgets: Readonly<Record<string, number>>,
-		options: { signed?: boolean; keyed?: boolean; signal?: AbortSignal } = {},
+		options: { signed?: boolean; keyed?: boolean; signal?: AbortSignal; timeoutMs?: number } = {},
 	): Promise<T> {
 		const signed = options.signed ?? false;
 		if (signed && !this.hasCredentials) throw new MissingCredentialsError(path);
@@ -169,7 +182,7 @@ export class BinanceRestClient {
 		// The timeout is armed BEFORE queuing, so the caller's budget covers the wait as well as the
 		// request. Otherwise a 429 penalty parks an order in the limiter for a full minute and then
 		// sends it at a price derived from a book that was checked for freshness a minute ago.
-		const timeout = AbortSignal.timeout(this.options.timeoutMs);
+		const timeout = AbortSignal.timeout(options.timeoutMs ?? this.options.timeoutMs);
 		const signal = options.signal ? AbortSignal.any([timeout, options.signal]) : timeout;
 
 		try {
@@ -235,13 +248,24 @@ export class BinanceRestClient {
 		return parsed;
 	}
 
+	/**
+	 * Adopts the exchange's own usage counters from the response headers.
+	 *
+	 * The header suffix is `(intervalNum)(intervalLetter)` - it reflects whatever intervals the
+	 * exchange currently publishes, so `X-MBX-ORDER-COUNT-10S` and `X-MBX-ORDER-COUNT-1S` are both
+	 * possible. Matching on a hardcoded suffix silently stops working the day that changes, so the
+	 * interval is parsed and matched by duration instead.
+	 */
 	private observeLimitHeaders(headers: Headers): void {
-		const usedWeight = headers.get("x-mbx-used-weight-1m");
-		if (usedWeight) this.options.limiter.syncUsedWeight(WEIGHT, Number.parseInt(usedWeight, 10));
-		const orderCount = headers.get("x-mbx-order-count-10s");
-		if (orderCount) this.options.limiter.syncUsedWeight(ORDERS, Number.parseInt(orderCount, 10));
-		const dayCount = headers.get("x-mbx-order-count-1d");
-		if (dayCount) this.options.limiter.syncUsedWeight(ORDERS_DAY, Number.parseInt(dayCount, 10));
+		headers.forEach((value, name) => {
+			const match = RATE_HEADER.exec(name);
+			if (!match) return;
+			const used = Number.parseInt(value, 10);
+			if (!Number.isFinite(used)) return;
+			const intervalMs = INTERVAL_MS[match[3].toLowerCase()] * Number.parseInt(match[2], 10);
+			const family = match[1].toLowerCase() === "used-weight" ? WEIGHT : ORDERS;
+			this.options.limiter.syncUsageByInterval(family, intervalMs, used);
+		});
 	}
 
 	async ping(signal?: AbortSignal): Promise<void> {
@@ -324,7 +348,7 @@ export class BinanceRestClient {
 			"/api/v3/order",
 			{ newOrderRespType: "FULL", ...params },
 			{ [WEIGHT]: ENDPOINT_WEIGHT.newOrder, [ORDERS]: 1, [ORDERS_DAY]: 1 },
-			{ signed: true, signal },
+			{ signed: true, signal, timeoutMs: this.options.orderTimeoutMs ?? this.options.timeoutMs },
 		);
 	}
 

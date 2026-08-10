@@ -140,6 +140,7 @@ function toOutcome(response: RawOrderResponse, latencyMs: number): OrderOutcome 
 		executedQty: decFromString(response.executedQty),
 		quoteQty: decFromString(response.cummulativeQuoteQty),
 		fills,
+		expiryReason: response.expiryReason,
 		latencyMs,
 	};
 }

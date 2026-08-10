@@ -7,7 +7,8 @@
 		"recvWindowMs": 5000,
 		"testnet": false,
 		"streamsPerConnection": 64,
-		"requestTimeoutMs": 5000
+		"requestTimeoutMs": 5000,
+		"orderTimeoutMs": 11000
 	},
 
 	"universe": {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { BinanceApiError } from "../src/binance/rest-client.js";
-import { BINANCE_ERROR } from "../src/binance/types.js";
+import { BINANCE_ERROR, EXPIRY_REASON } from "../src/binance/types.js";
 import { planOpportunity } from "../src/core/sizing.js";
 import { type ExecutionEngine, NOT_PLACED, type OrderOutcome, type OrderRequest } from "../src/exec/engine.js";
 import { CycleExecutor, reverseLeg } from "../src/exec/executor.js";
@@ -509,5 +509,38 @@ describe("resolving an ambiguous failure", () => {
 		expect(engine.resolved[0].symbol).toBe("ETHBTC");
 		expect(engine.resolved[0].clientOrderId).toMatch(/^arb-/);
 		expect(engine.requests.map((r) => r.clientOrderId)).toContain(engine.resolved[0].clientOrderId);
+	});
+});
+
+describe("expiry reasons", () => {
+	it("records why the exchange expired a leg", () => {
+		// A zero-fill IOC has several very different causes. UNFILLED_IOC_QUANTITY_EXPIRED is an
+		// ordinary lost race; EXECUTION_RULE_PRICE_RANGE_EXCEEDED means the exchange refused the
+		// price outright, which would otherwise look identical in the ledger.
+		const expired =
+			(reason: string) =>
+			(request: OrderRequest): OrderOutcome => ({
+				orderId: "",
+				clientOrderId: request.clientOrderId,
+				status: "EXPIRED",
+				executedQty: ZERO,
+				quoteQty: ZERO,
+				fills: [],
+				expiryReason: reason,
+				latencyMs: 2,
+			});
+
+		return (async () => {
+			const engine = new ScriptedEngine([expired(EXPIRY_REASON.PRICE_RANGE_EXCEEDED)]);
+			const result = await makeExecutor(engine).execute(buildOpportunity());
+			expect(result.outcome).toBe("aborted_no_fill");
+			expect(result.fills[0].expiryReason).toBe("EXECUTION_RULE_PRICE_RANGE_EXCEEDED");
+		})();
+	});
+
+	it("leaves the reason undefined on a normal fill", async () => {
+		const engine = new ScriptedEngine([fullFill, fullFill, fullFill]);
+		const result = await makeExecutor(engine).execute(buildOpportunity());
+		expect(result.fills[0].expiryReason).toBeUndefined();
 	});
 });

@@ -138,6 +138,9 @@ describe("validation", () => {
 		["an absurd fee", { fees: { takerBps: 900 } }],
 		["fill probability above one", { paper: { fillProbability: 2 } }],
 		["an unknown log level", { observability: { logLevel: "loud" } }],
+		// Binance's own matching-engine timeout is 10s; aborting sooner turns a slow but successful
+		// order into an ambiguous one that halts the bot.
+		["an order timeout below the exchange's own", { binance: { orderTimeoutMs: 5000 } }],
 	];
 
 	for (const [name, overrides] of bad) {

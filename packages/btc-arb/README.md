@@ -190,12 +190,36 @@ promised. It is the direct measure of how much of your detected edge survives ex
 npx vitest --run
 ```
 
-258 tests, all offline and deterministic — no network, no API keys, no paid calls. Coverage
+269 tests, all offline and deterministic — no network, no API keys, no paid calls. Coverage
 includes the exact-decimal money math, filter parsing and rounding, fee arithmetic (float screen
 checked against exact arithmetic), depth and lot-rounding rejections, cycle enumeration,
 Bellman-Ford sweeps, WebSocket reconnect and staleness state machines, HMAC signing against
 Binance's own documented worked example, rate-limit windows, every risk guard, and the executor's
 partial-fill, unwind, stranded-inventory and deadline paths.
+
+## Exchange rules not enforced client-side
+
+These are verified against the published spec and deliberately left to the exchange, because each
+one fails as a *definite* rejection or expiry — a clean zero-fill that the unwind path already
+handles — rather than as an ambiguous or partial outcome:
+
+- **`PRICE_RANGE` execution rule.** A newer rule, enforced at execution time rather than at order
+  acceptance: a taker order that would execute outside a band around a continuously-moving
+  reference price is expired with `EXECUTION_RULE_PRICE_RANGE_EXCEEDED`. Bands can be as tight as
+  a few basis points. This bot does not subscribe to `<symbol>@referencePrice`, so it cannot
+  predict the band — but it *records* the expiry reason, so a symbol that is systematically
+  refusing your aggression level is visible in the ledger rather than looking like bad luck.
+- **`PERCENT_PRICE_BY_SIDE`** is checked against the current touch instead of the exchange's
+  average-price reference. That makes the check weaker than the real one, never stronger. The
+  precise version would subscribe to `<symbol>@avgPrice`.
+- **`MAX_POSITION`, `MAX_NUM_ORDERS`, `EXCHANGE_MAX_NUM_ORDERS`** depend on account-wide state.
+  Since every order this bot sends is IOC and never rests, its open-order count is effectively
+  zero, so these bind only in unusual configurations.
+
+`expiryReason` is written to every ledger row, so the difference between "lost the race"
+(`UNFILLED_IOC_QUANTITY_EXPIRED`), "nothing on the book" (`INSUFFICIENT_LIQUIDITY`) and "the
+exchange refused this price" (`EXECUTION_RULE_PRICE_RANGE_EXCEEDED`) is recorded rather than
+collapsed into a generic miss.
 
 ## Not implemented, on purpose
 

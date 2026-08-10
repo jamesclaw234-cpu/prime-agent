@@ -472,6 +472,7 @@ function makeClient(config: ArbConfig, logger: Logger): BinanceRestClient {
 		apiSecret: config.binance.apiSecret,
 		recvWindowMs: config.binance.recvWindowMs,
 		timeoutMs: config.binance.requestTimeoutMs,
+		orderTimeoutMs: config.binance.orderTimeoutMs,
 		limiter: new RateLimiter({ limits: [...DEFAULT_LIMITS], safetyFactor: 0.7 }),
 		logger,
 	});

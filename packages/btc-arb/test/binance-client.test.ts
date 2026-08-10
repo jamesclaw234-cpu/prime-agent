@@ -332,3 +332,84 @@ describe("rate limiter", () => {
 		);
 	});
 });
+
+describe("error classification against the published table", () => {
+	it("treats every documented 'execution status unknown' code as ambiguous", () => {
+		// -1006 "An unexpected response was received from the message bus. Execution status unknown."
+		// -1007 "Timeout waiting for response from backend server. Send status unknown."
+		// -1000 unknown error. 5xx: the docs say explicitly NOT to treat these as failures.
+		for (const code of [BINANCE_ERROR.UNKNOWN, BINANCE_ERROR.TIMEOUT, BINANCE_ERROR.UNEXPECTED_RESP]) {
+			expect(new BinanceApiError(code, "x", 200, "/api/v3/order").ambiguous).toBe(true);
+		}
+		expect(new BinanceApiError(-1, "x", 503, "/api/v3/order").ambiguous).toBe(true);
+		expect(new BinanceApiError(-1, "x", 0, "/api/v3/order").ambiguous).toBe(true);
+	});
+
+	it("treats a request rejected before the matching engine as definite", () => {
+		// -1013: "The request is rejected by the API. (i.e. The request didn't reach the Matching Engine.)"
+		expect(new BinanceApiError(BINANCE_ERROR.FILTER_FAILURE, "Filter failure: LOT_SIZE", 400, "/x").ambiguous).toBe(
+			false,
+		);
+		expect(new BinanceApiError(BINANCE_ERROR.NEW_ORDER_REJECTED, "insufficient balance", 400, "/x").ambiguous).toBe(
+			false,
+		);
+	});
+
+	it("classifies the order-count limit as retryable, not as an IP ban", () => {
+		// -1015 is TOO_MANY_ORDERS, tracked per account. An IP ban is HTTP 418 or -1003.
+		const tooManyOrders = new BinanceApiError(BINANCE_ERROR.TOO_MANY_ORDERS, "Too many new orders.", 429, "/x");
+		expect(tooManyOrders.retryable).toBe(true);
+		expect(tooManyOrders.ambiguous).toBe(false);
+		expect(new BinanceApiError(BINANCE_ERROR.SERVER_BUSY, "overloaded", 503, "/x").retryable).toBe(true);
+	});
+});
+
+describe("rate limit headers", () => {
+	async function pingWith(
+		headers: Record<string, string>,
+		limits: { name: string; intervalMs: number; limit: number }[],
+	) {
+		const limiter = new RateLimiter({ limits, safetyFactor: 1, now: () => 0 });
+		const { fetchImpl } = stubFetch(() => ({ status: 200, body: "{}", headers }));
+		const client = new BinanceRestClient({
+			baseUrl: "https://api.example.test",
+			recvWindowMs: 5000,
+			timeoutMs: 1000,
+			limiter,
+			fetchImpl,
+			now: () => 0,
+		});
+		await client.ping();
+		return limiter.snapshot();
+	}
+
+	it("matches the header interval rather than a hardcoded suffix", async () => {
+		// The header suffix is (intervalNum)(intervalLetter), so it follows whatever intervals the
+		// exchange publishes. A 1-second order budget yields X-MBX-ORDER-COUNT-1S, not -10S.
+		const snapshot = await pingWith(
+			{ "x-mbx-used-weight-1m": "1234", "x-mbx-order-count-1s": "7", "x-mbx-order-count-1d": "900" },
+			[
+				{ name: WEIGHT, intervalMs: 60_000, limit: 6000 },
+				{ name: ORDERS, intervalMs: 1000, limit: 10 },
+				{ name: ORDERS_DAY, intervalMs: 86_400_000, limit: 160_000 },
+			],
+		);
+		expect(snapshot[WEIGHT].used).toBe(1234);
+		expect(snapshot[ORDERS].used).toBe(7);
+		expect(snapshot[ORDERS_DAY].used).toBe(900);
+	});
+
+	it("still matches a ten-second order budget", async () => {
+		const snapshot = await pingWith({ "x-mbx-order-count-10s": "22" }, [
+			{ name: ORDERS, intervalMs: 10_000, limit: 50 },
+		]);
+		expect(snapshot[ORDERS].used).toBe(22);
+	});
+
+	it("ignores a header whose interval no window covers", async () => {
+		const snapshot = await pingWith({ "x-mbx-order-count-3h": "5" }, [
+			{ name: ORDERS, intervalMs: 10_000, limit: 50 },
+		]);
+		expect(snapshot[ORDERS].used).toBe(0);
+	});
+});

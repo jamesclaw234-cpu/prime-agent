@@ -26,6 +26,13 @@ export interface OrderOutcome {
 	/** `cummulativeQuoteQty`: quote-asset amount actually traded. */
 	readonly quoteQty: Dec;
 	readonly fills: readonly SimpleFill[];
+	/**
+	 * Why the order expired, when it did.
+	 *
+	 * Separates an ordinary lost race from a price the exchange refused outright, which are the
+	 * same zero-fill outcome but very different problems.
+	 */
+	readonly expiryReason?: string;
 	readonly latencyMs: number;
 }
 

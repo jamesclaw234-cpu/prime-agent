@@ -305,6 +305,7 @@ export class CycleExecutor {
 			orderId: outcome.orderId,
 			clientOrderId: outcome.clientOrderId,
 			status: outcome.status,
+			expiryReason: outcome.expiryReason,
 			latencyMs: outcome.latencyMs,
 		};
 
@@ -482,6 +483,7 @@ export class CycleExecutor {
 				orderId: outcome.orderId,
 				clientOrderId: outcome.clientOrderId,
 				status: outcome.status,
+				expiryReason: outcome.expiryReason,
 				latencyMs: outcome.latencyMs,
 			},
 			filled: decIsPositive(outcome.executedQty) && decIsPositive(settled.amountOut),

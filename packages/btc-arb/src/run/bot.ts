@@ -100,6 +100,7 @@ export class ArbBot {
 			apiSecret: this.config.binance.apiSecret,
 			recvWindowMs: this.config.binance.recvWindowMs,
 			timeoutMs: this.config.binance.requestTimeoutMs,
+			orderTimeoutMs: this.config.binance.orderTimeoutMs,
 			limiter: this.limiter,
 			logger: this.logger,
 			fetchImpl: options.fetchImpl,

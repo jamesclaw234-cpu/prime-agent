@@ -159,10 +159,24 @@ export class RateLimiter {
 	}
 
 	/**
+	 * Aligns the window covering `intervalMs` in the given family with the exchange's own counter.
+	 *
+	 * Families exist because Binance publishes the order count under one header name for several
+	 * intervals at once - a 10-second budget and a daily budget are both `X-MBX-ORDER-COUNT-*` -
+	 * so the interval is what identifies the window, not the name.
+	 */
+	syncUsageByInterval(family: string, intervalMs: number, used: number): void {
+		const target = this.windows.find(
+			(window) => window.limit.intervalMs === intervalMs && belongsToFamily(window.limit.name, family),
+		);
+		if (target) this.syncUsedWeight(target.limit.name, used);
+	}
+
+	/**
 	 * Aligns local accounting with the exchange's own counter.
 	 *
-	 * The `X-MBX-USED-WEIGHT-1M` header is authoritative and includes usage this process cannot
-	 * see, so it is treated as a floor on our own tally, never a reason to relax it.
+	 * The header is authoritative and includes usage this process cannot see, so it is treated as
+	 * a floor on our own tally, never a reason to relax it.
 	 */
 	syncUsedWeight(windowName: string, used: number): void {
 		const window = this.windows.find((w) => w.limit.name === windowName);
@@ -192,6 +206,11 @@ export class RateLimiter {
 		}
 		return result;
 	}
+}
+
+/** True when a window name belongs to a header family, e.g. ORDERS_DAY is in the ORDERS family. */
+function belongsToFamily(windowName: string, family: string): boolean {
+	return windowName === family || windowName.startsWith(`${family}_`);
 }
 
 export const WEIGHT = "REQUEST_WEIGHT";

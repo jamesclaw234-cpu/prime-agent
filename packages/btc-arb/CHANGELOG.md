@@ -15,3 +15,8 @@ All notable changes to this package are documented in this file.
 - Added a JSONL trade ledger, metrics with latency percentiles, a live terminal dashboard, and tick recording with offline replay.
 - Added the `run`, `scan`, `symbols`, `doctor`, `replay` and `config` CLI commands.
 - Added recovery from an ambiguous order failure: the order is looked up by client id, and only an unanswerable lookup halts for manual reconciliation.
+- Added `expiryReason` to the trade ledger, separating an ordinary lost race from a price the exchange refused under its Price Range execution rule.
+- Added handling for the `serverShutdown` stream event, reconnecting on the notice instead of waiting for the socket to drop.
+- Changed rate-limit header parsing to match the published `(intervalNum)(intervalLetter)` format rather than a fixed suffix.
+- Changed order placement to use its own timeout above the exchange's 10-second processing timeout, so a slow order reports its outcome instead of becoming an unknown.
+- Fixed `-1006` not being treated as an ambiguous outcome despite the spec stating its execution status is unknown.
