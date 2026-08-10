@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { BinanceApiError } from "../src/binance/rest-client.js";
+import { BINANCE_ERROR } from "../src/binance/types.js";
 import { planOpportunity } from "../src/core/sizing.js";
 import type { ExecutionEngine, OrderOutcome, OrderRequest } from "../src/exec/engine.js";
 import { CycleExecutor, reverseLeg } from "../src/exec/executor.js";
@@ -206,6 +208,39 @@ describe("failure handling", () => {
 		await makeExecutor(engine).execute(buildOpportunity());
 		// One failed leg 2, then at most maxAttempts unwind attempts on leg 1.
 		expect(engine.requests.length).toBeLessThanOrEqual(2 + UNWIND.maxAttempts);
+	});
+
+	it("retries an unwind leg that fails definitively", async () => {
+		let unwindCall = 0;
+		const engine = new ScriptedEngine([
+			fullFill,
+			noFill,
+			(request) => {
+				unwindCall++;
+				// A filter rejection is a definite non-fill: retrying is safe and correct.
+				if (unwindCall === 1) return new BinanceApiError(-1013, "Filter failure: LOT_SIZE", 400, "/api/v3/order");
+				return fullFill(request);
+			},
+		]);
+		const result = await makeExecutor(engine).execute(buildOpportunity());
+		expect(engine.requests.length).toBeGreaterThanOrEqual(4);
+		expect(result.strandedAsset).toBeUndefined();
+	});
+
+	it("does not re-send an unwind order that failed ambiguously", async () => {
+		// A timeout may have executed. Re-sending would flatten the same inventory twice and leave
+		// the account short, which is strictly worse than the position we are trying to escape.
+		const engine = new ScriptedEngine([
+			fullFill,
+			noFill,
+			() => new BinanceApiError(BINANCE_ERROR.TIMEOUT, "Timeout waiting for response", 504, "/api/v3/order"),
+		]);
+		const result = await makeExecutor(engine).execute(buildOpportunity());
+
+		const unwindRequests = engine.requests.slice(2);
+		expect(unwindRequests).toHaveLength(1);
+		expect(result.strandedAsset).toBe("BTC");
+		expect(result.error).toContain("reconcile manually");
 	});
 
 	it("surfaces a thrown error without pretending the cycle completed", async () => {

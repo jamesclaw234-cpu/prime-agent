@@ -1,4 +1,5 @@
 import { roundPriceDown, roundPriceUp, roundQtyDown, validateLimitOrder } from "../binance/filters.js";
+import { BinanceApiError } from "../binance/rest-client.js";
 import type { UnwindConfig } from "../config.js";
 import type { BookStore } from "../core/book.js";
 import { aggressivePrice, edgeRateNum, type FeeModel } from "../core/pricing.js";
@@ -118,6 +119,11 @@ export class CycleExecutor {
 			const result = await this.unwind(legs, executedLegs, heldAsset, heldAmount, unwindFills, signal);
 			heldAsset = result.asset;
 			heldAmount = result.amount;
+			if (result.ambiguous) {
+				// The operator has to reconcile this by hand: an order that may or may not have
+				// executed leaves the true position unknown until the exchange is queried.
+				error = "unwind failed ambiguously; position may be inconsistent, reconcile manually";
+			}
 		}
 
 		// Nothing is recovered unless a leg actually executed. `heldAmount` starts at the *intended*
@@ -290,7 +296,7 @@ export class CycleExecutor {
 		startingAmount: Dec,
 		record: LegFill[],
 		signal?: AbortSignal,
-	): Promise<{ asset: string; amount: Dec }> {
+	): Promise<{ asset: string; amount: Dec; ambiguous?: boolean }> {
 		let asset = startingAsset;
 		let amount = startingAmount;
 
@@ -307,11 +313,17 @@ export class CycleExecutor {
 				} catch (error) {
 					// An unwind that throws must not escape: the caller needs the cycle result so it
 					// can see, and act on, the inventory that is now stranded.
+					const ambiguous = error instanceof BinanceApiError && error.ambiguous;
 					this.logger.error("unwind attempt threw", {
 						symbol: leg.symbol,
 						attempt: attempt + 1,
+						ambiguous,
 						error: error instanceof Error ? error.message : String(error),
 					});
+					// A timeout or 5xx may still have executed. Re-sending would flatten the same
+					// inventory twice and leave the account short, which is worse than the position
+					// we are trying to escape. Stop and let it be reported as stranded instead.
+					if (ambiguous) return { asset, amount, ambiguous: true };
 					continue;
 				}
 				if (!result) continue;

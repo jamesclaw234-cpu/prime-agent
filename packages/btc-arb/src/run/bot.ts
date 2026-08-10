@@ -161,9 +161,12 @@ export class ArbBot {
 		this.feed?.stop();
 		this.recorder?.flush();
 
-		// Let anything already sent finish rather than abandoning a half-executed cycle.
+		// Let anything already sent finish rather than abandoning a half-executed cycle. The
+		// iteration cap is what actually bounds this: `now` is injectable, and a frozen clock would
+		// otherwise spin here forever.
 		const deadline = this.now() + this.config.execution.cycleDeadlineMs * 2;
-		while (this.inFlight > 0 && this.now() < deadline) {
+		const maxWaits = Math.ceil((this.config.execution.cycleDeadlineMs * 2) / 50) + 1;
+		for (let waited = 0; waited < maxWaits && this.inFlight > 0 && this.now() < deadline; waited++) {
 			await new Promise((resolve) => setTimeout(resolve, 50));
 		}
 		if (this.inFlight > 0) {
@@ -501,10 +504,13 @@ export class ArbBot {
 	}
 
 	private async runCycle(opportunity: Opportunity): Promise<void> {
-		const executor = this.executor;
-		if (!executor) return;
+		// The caller has already reserved a concurrency slot and a risk slot, so every exit from
+		// here must release both. An early return before the `finally` would leak a slot
+		// permanently and silently stop the bot from ever trading again.
 		let result: CycleResult | undefined;
 		try {
+			const executor = this.executor;
+			if (!executor) throw new Error("executor not built");
 			result = await executor.execute(opportunity);
 		} catch (error) {
 			this.risk.onError(error instanceof Error ? error.message : String(error));
