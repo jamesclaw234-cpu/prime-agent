@@ -75,11 +75,30 @@ Live trading is deliberately hard to enter by accident. **All four** must hold:
 Any missing condition downgrades the run to paper and logs why, rather than aborting — a mis-set
 variable costs a paper session, not capital.
 
+### Where the key goes
+
+Nowhere in the repo. Credentials are read from the environment only, and a config file containing
+`apiKey` or `apiSecret` is rejected at load time. Copy the template, fill it in, and source it:
+
 ```bash
-export BINANCE_API_KEY=...
-export BINANCE_API_SECRET=...
-export ARB_LIVE_CONFIRM=I_UNDERSTAND_THE_RISK
+cp .env.example .env      # .env is gitignored; .env.example is not
+$EDITOR .env              # fill in BINANCE_API_KEY and BINANCE_API_SECRET
+set -a; source .env; set +a
 npx tsx src/cli.ts run --config arb.config.json --live
+```
+
+The bot does not read `.env` itself. Sourcing it is a deliberate extra step: a stray file in the
+working directory can never silently arm live trading.
+
+For a real 24/7 deployment, prefer your service manager's secret handling over a file on disk —
+with systemd that is `EnvironmentFile=` pointing somewhere `0600` and outside the repo, or a
+`LoadCredential=` mount.
+
+Verify what the process actually sees, without printing the secret:
+
+```bash
+npx tsx src/cli.ts config   # apiKey/apiSecret show as "<set>", never the value
+npx tsx src/cli.ts doctor   # confirms the key works and warns if it can withdraw
 ```
 
 **Create the API key with trading permission only. Never enable withdrawals, and restrict the key
