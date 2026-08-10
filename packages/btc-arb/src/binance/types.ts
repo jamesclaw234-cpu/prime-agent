@@ -98,6 +98,28 @@ export interface RawCommissionRates {
 	seller: string;
 }
 
+/** One component's rates. The side fields are ADDED to the maker/taker field, not alternatives. */
+export interface RawCommissionComponent {
+	maker: string;
+	taker: string;
+	buyer: string;
+	seller: string;
+}
+
+/** Response to `GET /api/v3/account/commission`. Per symbol; weight 20. */
+export interface RawSymbolCommission {
+	symbol: string;
+	standardCommission: RawCommissionComponent;
+	specialCommission?: RawCommissionComponent;
+	taxCommission?: RawCommissionComponent;
+	discount?: {
+		enabledForAccount?: boolean;
+		enabledForSymbol?: boolean;
+		discountAsset?: string;
+		discount?: string;
+	};
+}
+
 export interface RawAccountInfo {
 	/** Legacy integer basis-point fields, superseded by `commissionRates` but still present. */
 	makerCommission: number;

@@ -1,15 +1,31 @@
 import type { Cycle, CycleLeg, CycleQuote, OrderSide, TopOfBook } from "../types.js";
-import { type Dec, decDiv, decFromBps, decMul, decSub, decToNumber, ONE } from "../util/decimal.js";
+import {
+	type Dec,
+	decAdd,
+	decDiv,
+	decFromBps,
+	decFromString,
+	decIsPositive,
+	decMax,
+	decMul,
+	decSub,
+	decToBps,
+	decToNumber,
+	ONE,
+	ZERO,
+} from "../util/decimal.js";
 import type { BookStore } from "./book.js";
 
 /**
- * Taker fee model.
+ * Taker fee model: one scalar rate, applied in kind to the asset received on each leg.
  *
- * Commission is modelled as an in-kind deduction from the asset received on each leg, which is how
- * Binance settles a spot taker fill when the BNB discount is not in play. With the discount active
- * the commission is instead debited in BNB at the same percentage; charging it in kind at the
- * discounted rate is economically equivalent to within the BNB conversion spread, and errs by
- * sizing the next leg fractionally small rather than fractionally large.
+ * That matches how Binance settles a spot taker fill when the BNB discount is not in play. With
+ * the discount active the commission is debited in BNB instead; charging it in kind at the same
+ * percentage is economically equivalent to within the BNB conversion spread, and errs by sizing
+ * the next leg fractionally small rather than fractionally large.
+ *
+ * The rate itself comes from `effectiveTakerBps`, not from a guess: the fee is what every cycle
+ * has to clear, so it is the one input where being wrong low turns losses into apparent profits.
  */
 export interface FeeModel {
 	/** Taker rate as a fraction, e.g. 0.001 for 10bps. */
@@ -18,6 +34,49 @@ export interface FeeModel {
 	readonly takerMultiplier: Dec;
 	readonly takerMultiplierNum: number;
 	readonly takerBps: number;
+}
+
+/**
+ * Effective taker rate for one symbol, in basis points, from a commission-rates response.
+ *
+ * Three components are charged and summed: standard, tax and special. Within each, the side rate
+ * (`buyer` on a BUY, `seller` on a SELL) is ADDED to the `taker` rate rather than replacing it.
+ * The worse of the two sides is taken, because the model carries a single scalar rate and a
+ * cycle's legs run in both directions - over-stating the fee costs missed trades, under-stating it
+ * books losses as profits.
+ *
+ * The BNB discount is deliberately not modelled: it applies only to the standard component, and
+ * the published examples disagree on whether the `discount` field is the multiplier or the
+ * reduction. Ignoring it over-states the fee, which is the safe direction.
+ */
+export function effectiveTakerBps(commission: {
+	standardCommission?: { taker: string; buyer: string; seller: string };
+	taxCommission?: { taker: string; buyer: string; seller: string };
+	specialCommission?: { taker: string; buyer: string; seller: string };
+}): number {
+	let total = ZERO;
+	for (const part of [commission.standardCommission, commission.taxCommission, commission.specialCommission]) {
+		if (!part) continue;
+		const taker = decFromString(part.taker);
+		const worseSide = decMax(decFromString(part.buyer), decFromString(part.seller));
+		total = decAdd(total, decAdd(taker, worseSide));
+	}
+	return decToBps(total);
+}
+
+/** True when anything beyond the standard component is charged, which varies per symbol. */
+export function hasNonStandardCommission(commission: {
+	standardCommission?: { taker: string; buyer: string; seller: string };
+	taxCommission?: { taker: string; buyer: string; seller: string };
+	specialCommission?: { taker: string; buyer: string; seller: string };
+}): boolean {
+	for (const part of [commission.taxCommission, commission.specialCommission]) {
+		if (!part) continue;
+		for (const value of [part.taker, part.buyer, part.seller]) {
+			if (decIsPositive(decFromString(value))) return true;
+		}
+	}
+	return false;
 }
 
 export function makeFeeModel(takerBps: number): FeeModel {

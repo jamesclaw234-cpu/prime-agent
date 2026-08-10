@@ -161,7 +161,7 @@ The settings that matter most:
 | `risk.maxDailyLoss`                     | `50`    | Halts for the rest of the UTC day once breached.                                 |
 | `risk.maxOrdersPerSecond`               | `8`     | Hard cap well below the exchange's 50-orders-per-10-seconds limit.               |
 | `risk.haltOnStranded`                   | `true`  | Stop everything when a cycle leaves inventory the unwind could not flatten.      |
-| `fees.autoDetect`                       | `true`  | Reads the real `commissionRates.taker` from the account instead of guessing.     |
+| `fees.autoDetect`                       | `true`  | Reads the real, complete commission rate from the account instead of guessing.   |
 
 ## Risk controls
 
@@ -190,12 +190,29 @@ promised. It is the direct measure of how much of your detected edge survives ex
 npx vitest --run
 ```
 
-269 tests, all offline and deterministic — no network, no API keys, no paid calls. Coverage
+274 tests, all offline and deterministic — no network, no API keys, no paid calls. Coverage
 includes the exact-decimal money math, filter parsing and rounding, fee arithmetic (float screen
 checked against exact arithmetic), depth and lot-rounding rejections, cycle enumeration,
 Bellman-Ford sweeps, WebSocket reconnect and staleness state machines, HMAC signing against
 Binance's own documented worked example, rate-limit windows, every risk guard, and the executor's
 partial-fill, unwind, stranded-inventory and deadline paths.
+
+## The fee is the number that matters
+
+A cycle only exists if it clears the fee, so the taker rate is the one input where being wrong low
+turns a losing trade into an apparently profitable one. Binance charges **three** commission
+components — standard, tax and special — and within each, the side rate (`buyer` on a buy,
+`seller` on a sell) is *added* to the taker rate rather than replacing it. Reading only
+`commissionRates.taker` understates the true cost.
+
+With `fees.autoDetect`, the bot queries `GET /api/v3/account/commission` and sums all three
+components, taking the worse of the two sides since a cycle trades in both directions. If your
+account is charged anything beyond the standard component it logs a warning, because those rates
+vary per symbol and only one symbol is sampled — pin `fees.takerBps` explicitly in that case.
+
+The BNB discount is deliberately not modelled: it applies only to the standard component, and the
+published examples disagree on whether the `discount` field is the multiplier or the reduction.
+Ignoring it overstates the fee, which is the safe direction.
 
 ## Exchange rules not enforced client-side
 

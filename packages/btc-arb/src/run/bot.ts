@@ -8,7 +8,7 @@ import { BookStore, makeBook } from "../core/book.js";
 import { CycleIndex, enumerateCycles } from "../core/cycles.js";
 import { Detector } from "../core/detector.js";
 import { MarketGraph, pruneDeadEnds, selectUniverse } from "../core/graph.js";
-import { type FeeModel, makeFeeModel } from "../core/pricing.js";
+import { effectiveTakerBps, type FeeModel, hasNonStandardCommission, makeFeeModel } from "../core/pricing.js";
 import { Valuation } from "../core/valuation.js";
 import type { ExecutionEngine } from "../exec/engine.js";
 import { CycleExecutor } from "../exec/executor.js";
@@ -237,19 +237,52 @@ export class ArbBot {
 		}
 	}
 
+	/**
+	 * Establishes the taker fee the whole strategy is measured against.
+	 *
+	 * This is the single most consequential number in the system: the fee is what a cycle has to
+	 * clear, so under-stating it turns losing cycles into apparent profits. Preference order is
+	 * therefore most-complete first.
+	 */
 	private async resolveFees(): Promise<void> {
 		if (!this.config.fees.autoDetect || !this.client.hasCredentials) {
 			this.logger.info("using configured taker fee", { takerBps: this.fee.takerBps });
 			return;
 		}
+
+		// `/api/v3/account/commission` is per symbol, so one representative market is sampled
+		// rather than paying weight 20 for each of 50+ symbols.
+		const sample = this.sampleSymbolForCommission();
+		if (sample) {
+			try {
+				const commission = await this.client.commissionRates(sample);
+				const bps = effectiveTakerBps(commission);
+				this.fee = makeFeeModel(bps);
+				if (hasNonStandardCommission(commission)) {
+					this.logger.warn(
+						"account is charged tax or special commission; these vary per symbol and only one was sampled - pin fees.takerBps if cycles look profitable but lose money",
+						{ sampled: sample, takerBps: bps },
+					);
+				}
+				this.logger.info("taker fee resolved from commission rates", { sampled: sample, takerBps: bps });
+				return;
+			} catch (error) {
+				this.logger.warn("commission rates unavailable, falling back to account rates", {
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+		}
+
 		try {
 			const account = await this.client.account();
-			const taker = account.commissionRates?.taker;
-			if (taker) {
-				const rate = decFromString(taker);
-				this.fee = makeFeeModel(decToNumber(rate) * 10_000);
+			const rates = account.commissionRates;
+			if (rates) {
+				// The side rate is added to the taker rate; take the worse side, since a cycle's legs
+				// run in both directions and the model carries one scalar.
+				const bps = effectiveTakerBps({ standardCommission: rates });
+				this.fee = makeFeeModel(bps);
 			} else if (Number.isFinite(account.takerCommission)) {
-				// Legacy field is already in basis points.
+				// Legacy field, already in basis points.
 				this.fee = makeFeeModel(account.takerCommission);
 			}
 			this.logger.info("taker fee resolved from account", { takerBps: this.fee.takerBps });
@@ -259,6 +292,17 @@ export class ArbBot {
 				error: error instanceof Error ? error.message : String(error),
 			});
 		}
+	}
+
+	/** A liquid market in the configured universe, used to sample commission rates. */
+	private sampleSymbolForCommission(): MarketSymbol | undefined {
+		for (const start of this.config.execution.startAssets) {
+			for (const symbol of this.rules.keys()) {
+				const rule = this.rules.get(symbol);
+				if (rule && (rule.baseAsset === start || rule.quoteAsset === start)) return symbol;
+			}
+		}
+		return this.rules.keys().next().value;
 	}
 
 	private buildEngine(): void {

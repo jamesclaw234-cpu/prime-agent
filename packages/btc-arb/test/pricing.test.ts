@@ -4,6 +4,8 @@ import {
 	aggressivePrice,
 	edgeRate,
 	edgeRateNum,
+	effectiveTakerBps,
+	hasNonStandardCommission,
 	makeFeeModel,
 	quoteCycle,
 	quoteCycleExact,
@@ -149,5 +151,55 @@ describe("fee model", () => {
 		expect(decToString(makeFeeModel(10).takerMultiplier)).toBe("0.999");
 		expect(decToString(makeFeeModel(7.5).takerMultiplier)).toBe("0.99925");
 		expect(makeFeeModel(0).takerMultiplierNum).toBe(1);
+	});
+});
+
+describe("commission rates", () => {
+	// Rates taken verbatim from the worked example in Binance's Commission FAQ.
+	const COMMISSION = {
+		standardCommission: { maker: "0.00000010", taker: "0.00000020", buyer: "0.00000030", seller: "0.00000040" },
+		specialCommission: { maker: "0.01000000", taker: "0.02000000", buyer: "0.03000000", seller: "0.04000000" },
+		taxCommission: { maker: "0.00000112", taker: "0.00000114", buyer: "0.00000118", seller: "0.00000116" },
+	};
+
+	it("sums all three components, adding the side rate to the taker rate", () => {
+		// Each component contributes taker + the worse of buyer/seller:
+		//   standard 0.00000020 + 0.00000040 (seller)  = 0.00000060
+		//   tax      0.00000114 + 0.00000118 (buyer)   = 0.00000232
+		//   special  0.02000000 + 0.04000000 (seller)  = 0.06000000
+		// Note the tax component takes `buyer`, which is the larger side there.
+		expect(effectiveTakerBps(COMMISSION)).toBeCloseTo(600.0292, 6);
+	});
+
+	it("takes the worse side, because a cycle trades in both directions", () => {
+		const buyHeavy = {
+			standardCommission: { maker: "0", taker: "0.001", buyer: "0.0005", seller: "0" },
+		};
+		// taker 0.001 + worse side 0.0005 = 0.0015 -> 15bps, not 10bps.
+		expect(effectiveTakerBps(buyHeavy)).toBeCloseTo(15, 9);
+	});
+
+	it("matches the ordinary retail case exactly", () => {
+		// A standard account: 10bps taker, no side or non-standard components.
+		const plain = { standardCommission: { maker: "0.001", taker: "0.001", buyer: "0", seller: "0" } };
+		expect(effectiveTakerBps(plain)).toBeCloseTo(10, 9);
+		expect(hasNonStandardCommission(plain)).toBe(false);
+	});
+
+	it("flags an account charged beyond the standard component", () => {
+		expect(hasNonStandardCommission(COMMISSION)).toBe(true);
+		expect(
+			hasNonStandardCommission({
+				taxCommission: { taker: "0", buyer: "0", seller: "0" },
+				specialCommission: { taker: "0", buyer: "0", seller: "0" },
+			}),
+		).toBe(false);
+	});
+
+	it("never under-states the fee, which is the direction that loses money", () => {
+		// Using only the standard taker rate would report 10bps for an account that actually pays
+		// far more, making losing cycles look profitable.
+		const standardOnly = decToNumber(makeFeeModel(10).takerRate) * 10_000;
+		expect(effectiveTakerBps(COMMISSION)).toBeGreaterThan(standardOnly);
 	});
 });

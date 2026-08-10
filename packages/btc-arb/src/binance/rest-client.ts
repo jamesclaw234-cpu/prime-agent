@@ -11,6 +11,7 @@ import {
 	type RawExchangeInfo,
 	type RawOrderResponse,
 	type RawServerTime,
+	type RawSymbolCommission,
 } from "./types.js";
 
 /**
@@ -26,6 +27,7 @@ export const ENDPOINT_WEIGHT = {
 	bookTickerAll: 4,
 	bookTickerOne: 2,
 	account: 20,
+	accountCommission: 20,
 	newOrder: 1,
 	cancelOrder: 1,
 	queryOrder: 4,
@@ -338,6 +340,23 @@ export class BinanceRestClient {
 			"/api/v3/account",
 			{},
 			{ [WEIGHT]: ENDPOINT_WEIGHT.account },
+			{ signed: true, signal },
+		);
+	}
+
+	/**
+	 * Full commission breakdown for one symbol.
+	 *
+	 * Distinct from `account()`'s `commissionRates`, which carries only the standard component.
+	 * Trades are charged standard + tax + special, so the standard rate alone under-states the
+	 * real cost - and under-stating cost is the direction that makes a losing cycle look profitable.
+	 */
+	async commissionRates(symbol: MarketSymbol, signal?: AbortSignal): Promise<RawSymbolCommission> {
+		return this.request<RawSymbolCommission>(
+			"GET",
+			"/api/v3/account/commission",
+			{ symbol },
+			{ [WEIGHT]: ENDPOINT_WEIGHT.accountCommission },
 			{ signed: true, signal },
 		);
 	}
