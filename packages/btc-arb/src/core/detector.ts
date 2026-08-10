@@ -8,6 +8,14 @@ import { quoteCycle } from "./pricing.js";
 import { planOpportunity, type SizingInputs, type SizingRejection } from "./sizing.js";
 import type { Valuation } from "./valuation.js";
 
+/**
+ * Every reason a screened cycle can be turned down, as a bounded set of stable keys.
+ *
+ * `no_budget` is the detector's own: the start asset has no spendable balance, which is decided
+ * before sizing is even attempted.
+ */
+export type RejectionCode = SizingRejection | "no_budget";
+
 export interface DetectorOptions {
 	readonly store: BookStore;
 	readonly index: CycleIndex;
@@ -30,7 +38,7 @@ export interface DetectorOptions {
 	/** Supplies the spend cap for leg 1, in units of the cycle's start asset. */
 	readonly inputBudget: (startAsset: string) => { max: Dec; min: Dec } | undefined;
 	readonly onOpportunity: (opportunity: Opportunity, worstCaseEdgeBps: number) => void;
-	readonly onRejected?: (cycle: Cycle, screenedEdgeBps: number, code: SizingRejection, reason: string) => void;
+	readonly onRejected?: (cycle: Cycle, screenedEdgeBps: number, code: RejectionCode, reason: string) => void;
 }
 
 export interface DetectorStats {
@@ -139,12 +147,7 @@ export class Detector {
 		this.options.onOpportunity(result.opportunity, result.worstCaseEdgeBps);
 	}
 
-	private recordRejection(
-		cycle: Cycle,
-		screenedEdgeBps: number,
-		code: SizingRejection | "no_budget",
-		reason: string,
-	): void {
+	private recordRejection(cycle: Cycle, screenedEdgeBps: number, code: RejectionCode, reason: string): void {
 		this.rejected++;
 		// Grouped on the stable code, never on the message: the message embeds live numbers, so
 		// using it as a key would grow this map without bound over a 24/7 run.
@@ -157,7 +160,7 @@ export class Detector {
 				reason,
 			});
 		}
-		this.options.onRejected?.(cycle, screenedEdgeBps, code as SizingRejection, reason);
+		this.options.onRejected?.(cycle, screenedEdgeBps, code, reason);
 	}
 
 	stats(): DetectorStats {
