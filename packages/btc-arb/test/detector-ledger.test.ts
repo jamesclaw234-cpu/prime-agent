@@ -94,7 +94,7 @@ describe("detector", () => {
 		const { detector, found } = makeDetector(PROFITABLE, { inputBudget: () => undefined });
 		detector.scanAll();
 		expect(found).toHaveLength(0);
-		expect(detector.stats().rejectionsByReason["no budget for the start asset"]).toBeGreaterThan(0);
+		expect(detector.stats().rejectionsByReason.no_budget).toBeGreaterThan(0);
 	});
 
 	it("reacts to a book update that creates the edge", () => {
@@ -104,6 +104,25 @@ describe("detector", () => {
 		setQuote(store, "ETHUSDT", { bid: "12", bidQty: "100", ask: "13", askQty: "100" }, NOW, 500);
 		detector.onBookUpdate("ETHUSDT");
 		expect(found).toHaveLength(1);
+	});
+
+	it("groups rejections on a bounded set of codes, not on the message", () => {
+		// Messages embed live numbers ("net edge 0.45bps below..."), so grouping on them would add
+		// a new key on almost every rejection and grow this map without bound over a 24/7 run.
+		const { detector, store } = makeDetector(PROFITABLE, { minNetEdgeBps: 100_000, screenMarginBps: 100_000 });
+		for (let i = 0; i < 200; i++) {
+			setQuote(
+				store,
+				"ETHUSDT",
+				{ bid: `${12 + i * 0.01}`, bidQty: "100", ask: `${13 + i * 0.01}`, askQty: "100" },
+				NOW,
+				1000 + i,
+			);
+			detector.onBookUpdate("ETHUSDT");
+		}
+		const stats = detector.stats();
+		expect(stats.rejected).toBeGreaterThan(100);
+		expect(Object.keys(stats.rejectionsByReason).length).toBeLessThanOrEqual(4);
 	});
 
 	it("buckets rejection reasons for the operator", () => {

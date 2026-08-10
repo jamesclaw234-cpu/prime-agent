@@ -37,9 +37,27 @@ export interface SizingInputs {
 	readonly valuation?: { convert(amount: Dec, asset: Asset): Dec | undefined };
 }
 
+/**
+ * Stable, bounded set of rejection reasons.
+ *
+ * The human-readable `reason` embeds live numbers, so it is unique on almost every rejection and
+ * cannot be used as a grouping key: a long-running process would accumulate one bucket per
+ * rejection. Metrics and the dashboard group on `code` instead.
+ */
+export type SizingRejection =
+	| "book_missing_or_stale"
+	| "rules_missing"
+	| "limit_price_invalid"
+	| "no_capacity"
+	| "below_min_size"
+	| "leg_rounding"
+	| "filter_rejected"
+	| "edge_below_threshold"
+	| "worst_case_negative";
+
 export type SizingResult =
 	| { readonly ok: true; readonly opportunity: Opportunity; readonly worstCaseEdgeBps: number }
-	| { readonly ok: false; readonly reason: string; readonly leg?: number };
+	| { readonly ok: false; readonly code: SizingRejection; readonly reason: string; readonly leg?: number };
 
 interface LegContext {
 	readonly book: TopOfBook;
@@ -60,8 +78,8 @@ interface ForwardPass {
 	readonly dust: Map<Asset, Dec>;
 }
 
-function fail(reason: string, leg?: number): SizingResult {
-	return { ok: false, reason, leg };
+function fail(code: SizingRejection, reason: string, leg?: number): SizingResult {
+	return { ok: false, code, reason, leg };
 }
 
 /**
@@ -76,7 +94,7 @@ export function planOpportunity(inputs: SizingInputs): SizingResult {
 	const { cycle, store, rules, fee, now, maxBookAgeMs } = inputs;
 
 	const quote = quoteCycle(cycle, store, fee, now, maxBookAgeMs);
-	if (!quote) return fail("book missing or stale");
+	if (!quote) return fail("book_missing_or_stale", "book missing or stale");
 
 	const contexts: LegContext[] = [];
 	const depthScale = fractionToDec(inputs.depthUtilization);
@@ -84,14 +102,14 @@ export function planOpportunity(inputs: SizingInputs): SizingResult {
 	for (let index = 0; index < cycle.legs.length; index++) {
 		const leg = cycle.legs[index];
 		const book = store.get(leg.symbol);
-		if (!book) return fail("book missing", index);
+		if (!book) return fail("book_missing_or_stale", "book missing", index);
 		const rule = rules.get(leg.symbol);
-		if (!rule) return fail("symbol rules missing", index);
+		if (!rule) return fail("rules_missing", "symbol rules missing", index);
 
 		const touchPrice = leg.side === "BUY" ? book.ask : book.bid;
 		const rawLimit = aggressivePrice(book, leg, rule.tickSize, inputs.aggressionTicks);
 		const limitPrice = leg.side === "BUY" ? roundPriceUp(rule, rawLimit) : roundPriceDown(rule, rawLimit);
-		if (!decIsPositive(limitPrice)) return fail("limit price collapsed to zero", index);
+		if (!decIsPositive(limitPrice)) return fail("limit_price_invalid", "limit price collapsed to zero", index);
 
 		const displayed = leg.side === "BUY" ? book.askQty : book.bidQty;
 		contexts.push({
@@ -104,27 +122,31 @@ export function planOpportunity(inputs: SizingInputs): SizingResult {
 	}
 
 	const maxInput = capacityBoundedInput(cycle, contexts, fee, inputs.maxInput);
-	if (!decIsPositive(maxInput)) return fail("no capacity at the touch");
-	if (decLt(maxInput, inputs.minInput)) return fail("capacity below the minimum cycle size");
+	if (!decIsPositive(maxInput)) return fail("no_capacity", "no capacity at the touch");
+	if (decLt(maxInput, inputs.minInput)) return fail("below_min_size", "capacity below the minimum cycle size");
 
 	const expected = simulateForward(cycle, contexts, fee, maxInput, "touch");
-	if (typeof expected === "string") return fail(expected);
+	if (typeof expected === "string") return fail("leg_rounding", expected);
 
-	if (!decIsPositive(expected.amountIn)) return fail("leg 1 rounded down to nothing");
-	if (decLt(expected.amountIn, inputs.minInput)) return fail("post-rounding size below the minimum cycle size");
+	if (!decIsPositive(expected.amountIn)) return fail("leg_rounding", "leg 1 rounded down to nothing");
+	if (decLt(expected.amountIn, inputs.minInput))
+		return fail("below_min_size", "post-rounding size below the minimum cycle size");
 
 	// Validate the orders we would actually send, at the prices we would actually send them.
 	for (let index = 0; index < expected.plans.length; index++) {
 		const plan = expected.plans[index];
 		const context = contexts[index];
 		const check = validateLimitOrder(context.rules, plan.leg.side, plan.price, plan.quantity, context.touchPrice);
-		if (!check.ok) return fail(`${check.filter}: ${check.detail}`, index);
+		if (!check.ok) return fail("filter_rejected", `${check.filter}: ${check.detail}`, index);
 	}
 
 	const profit = decSub(expected.amountOut, expected.amountIn);
 	const netEdgeBps = decToNumber(decDiv(profit, expected.amountIn)) * 10_000;
 	if (netEdgeBps < inputs.minNetEdgeBps) {
-		return fail(`net edge ${netEdgeBps.toFixed(2)}bps below the ${inputs.minNetEdgeBps}bps threshold`);
+		return fail(
+			"edge_below_threshold",
+			`net edge ${netEdgeBps.toFixed(2)}bps below the ${inputs.minNetEdgeBps}bps threshold`,
+		);
 	}
 
 	const worst = simulateForward(cycle, contexts, fee, maxInput, "limit");
@@ -133,7 +155,10 @@ export function planOpportunity(inputs: SizingInputs): SizingResult {
 		worstCaseEdgeBps = decToNumber(decDiv(decSub(worst.amountOut, worst.amountIn), worst.amountIn)) * 10_000;
 	}
 	if (inputs.requireNonNegativeWorstCase && !(worstCaseEdgeBps >= 0)) {
-		return fail(`worst-case edge ${formatBps(worstCaseEdgeBps)} is negative at the limit price`);
+		return fail(
+			"worst_case_negative",
+			`worst-case edge ${formatBps(worstCaseEdgeBps)} is negative at the limit price`,
+		);
 	}
 
 	const opportunity: Opportunity = {

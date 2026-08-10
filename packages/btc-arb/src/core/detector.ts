@@ -5,7 +5,7 @@ import type { BookStore } from "./book.js";
 import type { CycleIndex } from "./cycles.js";
 import type { FeeModel } from "./pricing.js";
 import { quoteCycle } from "./pricing.js";
-import { planOpportunity, type SizingInputs } from "./sizing.js";
+import { planOpportunity, type SizingInputs, type SizingRejection } from "./sizing.js";
 import type { Valuation } from "./valuation.js";
 
 export interface DetectorOptions {
@@ -30,7 +30,7 @@ export interface DetectorOptions {
 	/** Supplies the spend cap for leg 1, in units of the cycle's start asset. */
 	readonly inputBudget: (startAsset: string) => { max: Dec; min: Dec } | undefined;
 	readonly onOpportunity: (opportunity: Opportunity, worstCaseEdgeBps: number) => void;
-	readonly onRejected?: (cycle: Cycle, screenedEdgeBps: number, reason: string) => void;
+	readonly onRejected?: (cycle: Cycle, screenedEdgeBps: number, code: SizingRejection, reason: string) => void;
 }
 
 export interface DetectorStats {
@@ -100,7 +100,7 @@ export class Detector {
 
 		const budget = this.options.inputBudget(cycle.startAsset);
 		if (!budget) {
-			this.recordRejection(cycle, quote.edgeBps, "no budget for the start asset");
+			this.recordRejection(cycle, quote.edgeBps, "no_budget", "no budget for the start asset");
 			return;
 		}
 
@@ -122,7 +122,7 @@ export class Detector {
 
 		const result = planOpportunity(inputs);
 		if (!result.ok) {
-			this.recordRejection(cycle, quote.edgeBps, result.reason);
+			this.recordRejection(cycle, quote.edgeBps, result.code, result.reason);
 			return;
 		}
 
@@ -139,19 +139,25 @@ export class Detector {
 		this.options.onOpportunity(result.opportunity, result.worstCaseEdgeBps);
 	}
 
-	private recordRejection(cycle: Cycle, screenedEdgeBps: number, reason: string): void {
+	private recordRejection(
+		cycle: Cycle,
+		screenedEdgeBps: number,
+		code: SizingRejection | "no_budget",
+		reason: string,
+	): void {
 		this.rejected++;
-		// Reasons carry numbers; bucket on the stable prefix so the histogram stays readable.
-		const bucket = reason.split(":")[0].slice(0, 60);
-		this.rejectionsByReason.set(bucket, (this.rejectionsByReason.get(bucket) ?? 0) + 1);
+		// Grouped on the stable code, never on the message: the message embeds live numbers, so
+		// using it as a key would grow this map without bound over a 24/7 run.
+		this.rejectionsByReason.set(code, (this.rejectionsByReason.get(code) ?? 0) + 1);
 		if (this.options.logEdgeBps > 0 && screenedEdgeBps >= this.options.logEdgeBps) {
 			this.logger.debug("opportunity rejected", {
 				cycle: cycle.id,
 				screenedBps: round2(screenedEdgeBps),
+				code,
 				reason,
 			});
 		}
-		this.options.onRejected?.(cycle, screenedEdgeBps, reason);
+		this.options.onRejected?.(cycle, screenedEdgeBps, code as SizingRejection, reason);
 	}
 
 	stats(): DetectorStats {
