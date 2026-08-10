@@ -23,6 +23,10 @@ This package is built to measure that honestly rather than to hide it:
   book, and the second price level is exactly where a few-basis-point edge stops existing.
 - Cycles are re-derived in exact decimal arithmetic after lot rounding, because a 12bps gross edge
   can round into a loss on a coarse lot grid.
+- The lot grid itself is a cost, and at small notionals it is the dominant one — around 68bps on a
+  $100 cycle, which is several times any edge that exists. See
+  [sizing for the lot grid](#size-the-cycle-for-the-lot-grid-not-for-your-risk-appetite); the fee
+  is not the reason a small cycle loses money.
 - The paper engine models latency, partial fills, adverse selection and outright misses, and it
   still overstates live performance — it cannot model queue position or the fact that a quote is
   often pulled precisely because someone faster acted on the same signal.
@@ -209,12 +213,77 @@ promised. It is the direct measure of how much of your detected edge survives ex
 npx vitest --run
 ```
 
-280 tests, all offline and deterministic — no network, no API keys, no paid calls. Coverage
+297 tests, all offline and deterministic — no network, no API keys, no paid calls. Coverage
 includes the exact-decimal money math, filter parsing and rounding, fee arithmetic (float screen
 checked against exact arithmetic), depth and lot-rounding rejections, cycle enumeration,
 Bellman-Ford sweeps, WebSocket reconnect and staleness state machines, HMAC signing against
 Binance's own documented worked example, rate-limit windows, every risk guard, and the executor's
 partial-fill, unwind, stranded-inventory and deadline paths.
+
+### Against a real socket
+
+`test/loopback.test.ts` runs the whole bot against `test/fake-binance.ts`, a Binance Spot server
+that speaks the real wire protocol on a loopback port. Nothing is stubbed there — Node's own
+`fetch` and `WebSocket` are used, and the server verifies the HMAC over the exact bytes it
+received, enforces `recvWindow`, keeps balances, matches IOC orders against displayed depth and
+refuses what the exchange would refuse. That covers the two boundaries a mocked transport cannot:
+query-string signing as it actually goes on the wire, and RFC 6455 framing produced by something
+other than us.
+
+### Rehearsing the live path without an exchange
+
+The same server runs standalone, so the real CLI can be driven end to end — including live order
+placement — before a single request reaches Binance. This is the only way to exercise the live
+path from a jurisdiction that Binance geo-blocks.
+
+```bash
+npx tsx test/mock-exchange.ts          # terminal 1
+```
+
+```bash
+# terminal 2, from packages/btc-arb
+export BINANCE_API_KEY=test-api-key
+export BINANCE_API_SECRET=test-api-secret-0123456789
+npx tsx src/cli.ts doctor --config mock.config.json
+npx tsx src/cli.ts scan   --config mock.config.json
+
+# and the live order path, against loopback hosts that cannot reach real money
+export ARB_MODE=live ARB_LIVE_CONFIRM=I_UNDERSTAND_THE_RISK
+npx tsx src/cli.ts run --live --config mock.config.json --duration 60
+```
+
+The mock opens an arbitrage window on a schedule and its prices walk from a fixed seed, so a run
+is reproducible. It is a rehearsal rig, not a market simulator: the edge it offers is far fatter
+than any real book's.
+
+## Size the cycle for the lot grid, not for your risk appetite
+
+The most expensive thing about a small triangular cycle is not the fee — it is the lot step.
+
+Commission is deducted from the asset you receive, so every intermediate leg lands off the next
+symbol's `stepSize` grid and the remainder cannot be forwarded or sold: it is below `minQty`. That
+dust stays in the account, so it is not lost, but it is not working either, and the cycle's PnL is
+reported without it. Expect roughly half a step per intermediate asset, per cycle.
+
+Half a step is a fixed cost, so its cost *in basis points* is set entirely by the notional:
+
+| notional per cycle | dust drag on a USDT→BTC→ETH→USDT cycle |
+| ------------------ | -------------------------------------- |
+| $100               | ~68 bps                                |
+| $1,000             | ~7 bps                                 |
+| $10,000            | ~0.7 bps                               |
+
+BTCUSDT's step is `0.00001` BTC, which is about a dollar. On a $100 cycle that single step is
+100bps — several times any edge that actually exists. **At the shipped `maxNotionalPerCycle` the
+lot grid costs more than the strategy earns.** The defaults are sized to make a mistake cheap
+while you are learning the system, not to make money; raising the notional is what makes the
+arithmetic work, and that is a decision about risk, not a tuning knob to turn casually.
+
+Cycles are logged with their dust, so this is measurable rather than theoretical:
+
+```
+cycle finished cycle=USDT>BTC>ETH>USDT outcome=completed pnl=0.452 dust={"BTC":0.0000016,"ETH":0.0000715}
+```
 
 ## The fee is the number that matters
 

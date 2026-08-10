@@ -4,7 +4,7 @@ import type { UnwindConfig } from "../config.js";
 import type { BookStore } from "../core/book.js";
 import { aggressivePrice, edgeRateNum, type FeeModel } from "../core/pricing.js";
 import type { CycleLeg, CycleOutcome, CycleResult, LegFill, MarketSymbol, Opportunity, SymbolRules } from "../types.js";
-import { type Dec, decDiv, decIsPositive, decLt, decMul, decSub, decToNumber, ZERO } from "../util/decimal.js";
+import { type Dec, decAdd, decDiv, decIsPositive, decLt, decMul, decSub, decToNumber, ZERO } from "../util/decimal.js";
 import { type Logger, silentLogger } from "../util/logger.js";
 import { type ExecutionEngine, NOT_PLACED, newClientOrderId, settleLeg } from "./engine.js";
 
@@ -162,6 +162,7 @@ export class CycleExecutor {
 		// Retrace each partial-fill residual back to the start asset. Each one sits in the input
 		// asset of the leg that under-consumed it, so the path back is that leg's predecessors.
 		let recoveredResidual = ZERO;
+		const dust = new Map<string, Dec>();
 		if (canUnwind && !needsReconciliation) {
 			for (const residual of residuals) {
 				const result = await this.unwind(
@@ -178,6 +179,10 @@ export class CycleExecutor {
 				}
 				if (result.asset === startAsset) {
 					recoveredResidual = (recoveredResidual + result.amount) as Dec;
+				} else if (result.dust) {
+					// Untradeable by construction. Left in the account, and left out of the PnL, which
+					// understates the result by the value of the dust - the safe direction to be wrong.
+					dust.set(result.asset, decAdd(dust.get(result.asset) ?? ZERO, result.amount));
 				} else {
 					this.logger.warn("partial-fill residual could not be retraced", {
 						asset: result.asset,
@@ -238,6 +243,11 @@ export class CycleExecutor {
 			pnl: decToNumber(realizedPnl),
 			expected: decToNumber(opportunity.expectedProfit),
 			durationMs: result.finishedAt - startedAt,
+			// Small by definition, but it accumulates across a 24/7 run, so it is reported rather
+			// than dropped. Anything here is sitting in the account, not lost.
+			...(dust.size > 0
+				? { dust: Object.fromEntries([...dust].map(([asset, amount]) => [asset, decToNumber(amount)])) }
+				: {}),
 		});
 
 		return result;
@@ -334,6 +344,33 @@ export class CycleExecutor {
 		}
 	}
 
+	/**
+	 * True when the amount is too small to form a legal order on this leg, at any price we would use.
+	 *
+	 * This is the ordinary end state of a triangular cycle, not a fault. Commission is deducted from
+	 * the asset received, so each leg's output lands off the next symbol's lot grid and a sliver is
+	 * always left behind. It cannot be sold - it is below `minQty` or `minNotional` - so retrying it
+	 * and then logging "inventory stranded" reports a failure on every healthy cycle, which teaches
+	 * the operator to ignore the one line that means a real position is sitting there unhedged.
+	 *
+	 * A missing book is deliberately not dust: it means we cannot tell, and the caller should keep
+	 * treating it as a failed unwind.
+	 */
+	private belowExchangeMinimum(leg: CycleLeg, amount: Dec): boolean {
+		const rules = this.options.rules.get(leg.symbol);
+		const book = this.options.store.get(leg.symbol);
+		if (!rules || !book) return false;
+
+		const raw = aggressivePrice(book, leg, rules.tickSize, this.options.unwind.aggressionTicks);
+		const price = leg.side === "BUY" ? roundPriceUp(rules, raw) : roundPriceDown(rules, raw);
+		if (!decIsPositive(price)) return false;
+
+		const quantity = this.quantityFor(leg, rules, price, amount);
+		if (!decIsPositive(quantity)) return true;
+		if (decIsPositive(rules.minQty) && decLt(quantity, rules.minQty)) return true;
+		return decIsPositive(rules.minNotional) && decLt(decMul(price, quantity), rules.minNotional);
+	}
+
 	/** Base-asset quantity implied by holding `available` of the leg's input asset. */
 	private quantityFor(leg: CycleLeg, rules: SymbolRules, price: Dec, available: Dec): Dec {
 		const raw = leg.side === "SELL" ? available : decDiv(available, price);
@@ -387,7 +424,7 @@ export class CycleExecutor {
 		startingAmount: Dec,
 		record: LegFill[],
 		signal?: AbortSignal,
-	): Promise<{ asset: string; amount: Dec; ambiguous?: boolean }> {
+	): Promise<{ asset: string; amount: Dec; ambiguous?: boolean; dust?: boolean }> {
 		let asset = startingAsset;
 		let amount = startingAmount;
 
@@ -395,6 +432,17 @@ export class CycleExecutor {
 			const leg = reverseLeg(legs[index].leg);
 			if (leg.fromAsset !== asset) break;
 			if (!decIsPositive(amount)) break;
+
+			// Checked before the attempts, not after three of them: nothing about an amount below the
+			// exchange minimum changes on a retry, and the retries sit inside the cycle deadline.
+			if (this.belowExchangeMinimum(leg, amount)) {
+				this.logger.debug("residual is below the exchange minimum, left as dust", {
+					symbol: leg.symbol,
+					asset,
+					amount: decToNumber(amount),
+				});
+				return { asset, amount, dust: true };
+			}
 
 			let filled = false;
 			for (let attempt = 0; attempt < Math.max(1, this.options.unwind.maxAttempts); attempt++) {

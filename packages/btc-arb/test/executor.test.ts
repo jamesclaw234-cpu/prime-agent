@@ -7,6 +7,7 @@ import { CycleExecutor, reverseLeg } from "../src/exec/executor.js";
 import { PaperEngine } from "../src/exec/paper-engine.js";
 import type { Asset, Opportunity } from "../src/types.js";
 import { type Dec, decMul, decSub, decToNumber, decToString, ZERO } from "../src/util/decimal.js";
+import { Logger } from "../src/util/logger.js";
 import { BTCUSDT, d, ETHBTC, ETHUSDT, FEE_10BPS, makeStore, PROFITABLE, TRIANGLE } from "./fixtures.js";
 
 const NOW = 1_000_000;
@@ -405,6 +406,65 @@ describe("partial fill on a middle leg", () => {
 		// Recovered output is the converted path plus the retraced remainder, so the cycle does not
 		// book the whole input as a loss.
 		expect(decToNumber(result.amountOut)).toBeGreaterThan(decToNumber(result.amountIn) * 0.9);
+	});
+
+	/**
+	 * Regression: a remainder too small to sell used to be reported as stranded inventory.
+	 *
+	 * Commission comes out of the asset received, so a sliver below the next symbol's `minQty` is
+	 * the normal end state of a healthy cycle - it was being retried three times and then logged at
+	 * `error` on every single one. On a bot meant to run unattended for weeks that is worse than
+	 * cosmetic: it makes the log line that means "a real position is sitting unhedged" invisible.
+	 */
+	it("leaves an untradeable remainder as dust without retrying or crying wolf", async () => {
+		const logged: string[] = [];
+		const engine = new ScriptedEngine([fullFill, fullFill, partialFill("0.999995")]);
+		const executor = new CycleExecutor({
+			engine,
+			store: makeStore(PROFITABLE, NOW),
+			rules: RULES,
+			fee: FEE_10BPS,
+			cycleDeadlineMs: 3000,
+			aggressionTicks: 0,
+			unwind: UNWIND,
+			maxBookAgeMs: 5000,
+			now: () => NOW,
+			logger: new Logger({ level: "debug", pretty: false, sink: (line) => logged.push(line) }),
+		});
+
+		const result = await executor.execute(buildOpportunity());
+
+		expect(result.outcome).toBe("completed");
+		expect(result.strandedAsset).toBeUndefined();
+		// Three legs and nothing else: the remainder is below ETHBTC's minQty, so not one unwind
+		// order is sent, let alone the three the retry bound would have allowed.
+		expect(engine.requests).toHaveLength(3);
+		expect(result.unwindFills).toHaveLength(0);
+		const entries = logged.map((line) => JSON.parse(line) as { level: string; msg: string });
+		expect(entries.filter((entry) => entry.level === "error")).toHaveLength(0);
+		expect(entries.filter((entry) => entry.level === "warn")).toHaveLength(0);
+		expect(entries.some((entry) => entry.level === "debug" && /dust/.test(entry.msg))).toBe(true);
+	});
+
+	it("still reports a remainder that was large enough to sell but did not", async () => {
+		// The other side of the same coin: a genuinely failed retrace must keep its warning.
+		const logged: string[] = [];
+		const engine = new ScriptedEngine([fullFill, partialFill("0.4"), fullFill, noFill, noFill, noFill]);
+		const executor = new CycleExecutor({
+			engine,
+			store: makeStore(PROFITABLE, NOW),
+			rules: RULES,
+			fee: FEE_10BPS,
+			cycleDeadlineMs: 3000,
+			aggressionTicks: 0,
+			unwind: UNWIND,
+			maxBookAgeMs: 5000,
+			now: () => NOW,
+			logger: new Logger({ level: "warn", pretty: false, sink: (line) => logged.push(line) }),
+		});
+
+		await executor.execute(buildOpportunity());
+		expect(logged.some((message) => /stranded|could not be retraced/.test(message))).toBe(true);
 	});
 
 	it("books a phantom loss if the remainder is ignored", async () => {

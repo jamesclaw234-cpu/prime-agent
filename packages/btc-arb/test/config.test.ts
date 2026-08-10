@@ -224,7 +224,7 @@ describe("argument parsing", () => {
 describe("shipped config profiles", () => {
 	// The profiles are documentation people copy verbatim. A profile that no longer validates is a
 	// broken instruction, so they are loaded here rather than trusted to stay correct.
-	const profiles = ["arb.config.example.json", "binance-us.config.json"];
+	const profiles = ["arb.config.example.json", "binance-us.config.json", "mock.config.json"];
 
 	for (const profile of profiles) {
 		it(`${profile} loads and validates`, () => {
@@ -237,6 +237,15 @@ describe("shipped config profiles", () => {
 		const config = loadConfig({ file: join(import.meta.dirname, "..", "binance-us.config.json"), env: {} });
 		expect(config.binance.restBaseUrl).toBe("https://api.binance.us");
 		expect(config.binance.wsBaseUrl).toBe("wss://stream.binance.us:9443");
+		expect(config.mode).toBe("paper");
+	});
+
+	it("the mock profile can only ever reach a loopback address", () => {
+		// It is the one shipped profile with plaintext hosts. If a hostname other than loopback ever
+		// appeared here, the https guard would be bypassed against a real venue.
+		const config = loadConfig({ file: join(import.meta.dirname, "..", "mock.config.json"), env: {} });
+		expect(new URL(config.binance.restBaseUrl).hostname).toBe("127.0.0.1");
+		expect(new URL(config.binance.wsBaseUrl).hostname).toBe("127.0.0.1");
 		expect(config.mode).toBe("paper");
 	});
 
