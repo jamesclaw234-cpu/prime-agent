@@ -20,4 +20,5 @@ All notable changes to this package are documented in this file.
 - Changed rate-limit header parsing to match the published `(intervalNum)(intervalLetter)` format rather than a fixed suffix.
 - Changed order placement to use its own timeout above the exchange's 10-second processing timeout, so a slow order reports its outcome instead of becoming an unknown.
 - Fixed `-1006` not being treated as an ambiguous outcome despite the spec stating its execution status is unknown.
+- Changed the unfilled-order budget to follow the exchange's own count in both directions, since a filled order decrements it and the previous floor-only behaviour throttled the bot exactly when its orders were trading.
 - Fixed the taker fee understating the real cost: Binance charges standard, tax and special commission components, and adds the side rate to the taker rate within each. The bot now sums all three from `GET /api/v3/account/commission` and warns when non-standard components apply.

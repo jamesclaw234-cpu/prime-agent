@@ -413,3 +413,52 @@ describe("rate limit headers", () => {
 		expect(snapshot[ORDERS].used).toBe(0);
 	});
 });
+
+describe("unfilled order count", () => {
+	it("follows the exchange's count downward, because fills decrement it", async () => {
+		// The ORDERS limit counts *unfilled* orders and decrements when one fills: "so long as your
+		// orders trade, you can keep trading". Treating the header as a floor would throttle the bot
+		// exactly when its orders are filling.
+		const limiter = new RateLimiter({
+			limits: [{ name: ORDERS, intervalMs: 10_000, limit: 50 }],
+			safetyFactor: 1,
+			now: () => 0,
+		});
+		await limiter.acquire({ [ORDERS]: 40 });
+		expect(limiter.snapshot()[ORDERS].used).toBe(40);
+
+		const { fetchImpl } = stubFetch(() => ({ status: 200, body: "{}", headers: { "x-mbx-order-count-10s": "3" } }));
+		const client = new BinanceRestClient({
+			baseUrl: "https://api.example.test",
+			recvWindowMs: 5000,
+			timeoutMs: 1000,
+			limiter,
+			fetchImpl,
+			now: () => 0,
+		});
+		await client.ping();
+		expect(limiter.snapshot()[ORDERS].used).toBe(3);
+		expect(limiter.canAcquire({ [ORDERS]: 40 })).toBe(true);
+	});
+
+	it("keeps floor semantics for request weight, which has no decrement", async () => {
+		const limiter = new RateLimiter({
+			limits: [{ name: WEIGHT, intervalMs: 60_000, limit: 6000 }],
+			safetyFactor: 1,
+			now: () => 0,
+		});
+		await limiter.acquire({ [WEIGHT]: 500 });
+		const { fetchImpl } = stubFetch(() => ({ status: 200, body: "{}", headers: { "x-mbx-used-weight-1m": "10" } }));
+		const client = new BinanceRestClient({
+			baseUrl: "https://api.example.test",
+			recvWindowMs: 5000,
+			timeoutMs: 1000,
+			limiter,
+			fetchImpl,
+			now: () => 0,
+		});
+		await client.ping();
+		// Other processes on the same IP add weight we cannot see, so a lower header never relaxes us.
+		expect(limiter.snapshot()[WEIGHT].used).toBeGreaterThanOrEqual(500);
+	});
+});

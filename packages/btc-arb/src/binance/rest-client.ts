@@ -338,7 +338,8 @@ export class BinanceRestClient {
 		return this.request<RawAccountInfo>(
 			"GET",
 			"/api/v3/account",
-			{},
+			// The payload lists every asset ever held otherwise; only fundable balances matter here.
+			{ omitZeroBalances: true },
 			{ [WEIGHT]: ENDPOINT_WEIGHT.account },
 			{ signed: true, signal },
 		);

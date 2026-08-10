@@ -159,7 +159,7 @@ The settings that matter most:
 | `execution.aggressionTicks`             | `2`     | Ticks through the touch. Zero prices at the touch and often misses.              |
 | `execution.requireNonNegativeWorstCase` | `true`  | Reject cycles that lose money at the limit price.                                |
 | `risk.maxDailyLoss`                     | `50`    | Halts for the rest of the UTC day once breached.                                 |
-| `risk.maxOrdersPerSecond`               | `8`     | Hard cap well below the exchange's 50-orders-per-10-seconds limit.               |
+| `risk.maxOrdersPerSecond`               | `8`     | Local cap, independent of the exchange's own unfilled-order limit.              |
 | `risk.haltOnStranded`                   | `true`  | Stop everything when a cycle leaves inventory the unwind could not flatten.      |
 | `fees.autoDetect`                       | `true`  | Reads the real, complete commission rate from the account instead of guessing.   |
 
@@ -190,7 +190,7 @@ promised. It is the direct measure of how much of your detected edge survives ex
 npx vitest --run
 ```
 
-274 tests, all offline and deterministic — no network, no API keys, no paid calls. Coverage
+276 tests, all offline and deterministic — no network, no API keys, no paid calls. Coverage
 includes the exact-decimal money math, filter parsing and rounding, fee arithmetic (float screen
 checked against exact arithmetic), depth and lot-rounding rejections, cycle enumeration,
 Bellman-Ford sweeps, WebSocket reconnect and staleness state machines, HMAC signing against

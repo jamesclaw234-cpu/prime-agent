@@ -169,7 +169,31 @@ export class RateLimiter {
 		const target = this.windows.find(
 			(window) => window.limit.intervalMs === intervalMs && belongsToFamily(window.limit.name, family),
 		);
-		if (target) this.syncUsedWeight(target.limit.name, used);
+		if (!target) return;
+		// The unfilled-order count is authoritative in BOTH directions: it is tracked per account
+		// across every key and IP, and it *decrements* when an order fills. Treating it as a floor
+		// would make the bot throttle itself precisely when its orders are trading - the opposite
+		// of the behaviour the limit is designed to reward. Request weight has no such decrement,
+		// so it keeps floor semantics.
+		if (family === ORDERS) this.setUsage(target, used);
+		else this.syncUsedWeight(target.limit.name, used);
+	}
+
+	/**
+	 * Replaces a window's usage with the exchange's own figure.
+	 *
+	 * The whole count is re-dated to now, so it ages out a full window from here rather than from
+	 * whenever the original orders were sent. That is deliberately pessimistic: the docs warn of a
+	 * short delay between a fill and the count updating.
+	 */
+	private setUsage(window: WindowState, used: number): void {
+		if (!Number.isFinite(used) || used < 0) return;
+		window.entries.length = 0;
+		window.used = 0;
+		if (used > 0) {
+			window.entries.push({ at: this.now(), units: used });
+			window.used = used;
+		}
 	}
 
 	/**
