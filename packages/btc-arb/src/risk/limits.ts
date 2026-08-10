@@ -8,6 +8,9 @@ export type RiskDecision = { readonly allowed: true } | { readonly allowed: fals
 
 const ALLOWED: RiskDecision = { allowed: true };
 
+/** Prefix identifying the one halt reason that is scoped to a single UTC day. */
+const DAILY_LOSS_HALT = "daily loss limit";
+
 function deny(reason: string): RiskDecision {
 	return { allowed: false, reason };
 }
@@ -45,13 +48,19 @@ export class RiskManager {
 	private readonly now: () => number;
 	private readonly fileExists: (path: string) => boolean;
 
-	private halted = false;
-	private haltReason?: string;
+	/**
+	 * Every reason trading is currently halted.
+	 *
+	 * A set rather than a single string: a stranded-inventory halt raised while a daily-loss halt
+	 * is already active must survive the UTC rollover that clears the daily one.
+	 */
+	private readonly haltReasons = new Set<string>();
 	private openCycles = 0;
 	private cyclesToday = 0;
 	private dailyPnl: Dec = ZERO;
 	private consecutiveFailures = 0;
 	private lastCycleStartedAt = 0;
+	private reservedOrders = 0;
 	private currentDay: string;
 	private readonly errorTimestamps: number[] = [];
 	private readonly orderTimestamps: number[] = [];
@@ -81,24 +90,22 @@ export class RiskManager {
 	}
 
 	get isHalted(): boolean {
-		return this.halted;
+		return this.haltReasons.size > 0;
 	}
 
 	get reason(): string | undefined {
-		return this.haltReason;
+		return this.haltReasons.size === 0 ? undefined : [...this.haltReasons].join("; ");
 	}
 
 	halt(reason: string): void {
-		if (this.halted) return;
-		this.halted = true;
-		this.haltReason = reason;
-		this.logger.error("trading halted", { reason });
+		if (this.haltReasons.has(reason)) return;
+		this.haltReasons.add(reason);
+		this.logger.error("trading halted", { reason, activeReasons: this.haltReasons.size });
 	}
 
 	/** Clears a halt. Deliberately manual: an automatic resume defeats the purpose of halting. */
 	resume(): void {
-		this.halted = false;
-		this.haltReason = undefined;
+		this.haltReasons.clear();
 		this.consecutiveFailures = 0;
 		this.errorTimestamps.length = 0;
 		this.logger.warn("trading resumed by operator");
@@ -132,10 +139,10 @@ export class RiskManager {
 		this.currentDay = day;
 		this.dailyPnl = ZERO;
 		this.cyclesToday = 0;
-		// A daily-loss halt is scoped to its day; a halt for any other reason survives the rollover.
-		if (this.halted && this.haltReason?.startsWith("daily loss")) {
-			this.halted = false;
-			this.haltReason = undefined;
+		// A daily-loss halt is scoped to its day. Every other reason survives the rollover, which
+		// is why the reasons are tracked individually rather than as one collapsed string.
+		for (const reason of this.haltReasons) {
+			if (reason.startsWith(DAILY_LOSS_HALT)) this.haltReasons.delete(reason);
 		}
 	}
 
@@ -155,7 +162,7 @@ export class RiskManager {
 
 		const config = this.options.config;
 
-		if (this.halted) return deny(this.haltReason ?? "halted");
+		if (this.isHalted) return deny(this.reason ?? "halted");
 		if (!this.dataHealthy) return deny("market data feed is unhealthy");
 		if (Math.abs(this.clockSkewMs) > config.maxClockSkewMs) {
 			return deny(`clock skew ${this.clockSkewMs}ms exceeds ${config.maxClockSkewMs}ms`);
@@ -170,7 +177,7 @@ export class RiskManager {
 			return deny("daily cycle cap reached");
 		}
 		if (decIsNegative(this.dailyPnl) && decGt(decNeg(this.dailyPnl), decFromNumber(config.maxDailyLoss))) {
-			this.halt(`daily loss limit of ${config.maxDailyLoss} reached`);
+			this.halt(`${DAILY_LOSS_HALT} of ${config.maxDailyLoss} reached`);
 			return deny("daily loss limit reached");
 		}
 		if (this.consecutiveFailures >= config.maxConsecutiveFailures) {
@@ -207,7 +214,25 @@ export class RiskManager {
 		this.openCycles++;
 		this.cyclesToday++;
 		this.lastCycleStartedAt = now;
+		// Reserve the planned legs up front; `recordOrder` then accounts for anything extra the
+		// executor sends, which in practice means unwind retries.
 		for (let i = 0; i < opportunity.legs.length; i++) this.orderTimestamps.push(now);
+		this.reservedOrders = opportunity.legs.length;
+	}
+
+	/**
+	 * Records one outbound order.
+	 *
+	 * The first calls of a cycle are already covered by the reservation `onCycleStart` made, so
+	 * only the surplus is added. Without this an unwinding cycle can emit several times its planned
+	 * order count while the per-second budget still believes it sent three.
+	 */
+	recordOrder(): void {
+		if (this.reservedOrders > 0) {
+			this.reservedOrders--;
+			return;
+		}
+		this.orderTimestamps.push(this.now());
 	}
 
 	/**
@@ -267,8 +292,8 @@ export class RiskManager {
 		let cooling = 0;
 		for (const until of this.cooldownUntil.values()) if (until > now) cooling++;
 		return {
-			halted: this.halted,
-			haltReason: this.haltReason,
+			halted: this.isHalted,
+			haltReason: this.reason,
 			openCycles: this.openCycles,
 			dailyPnl: decToNumber(this.dailyPnl),
 			cyclesToday: this.cyclesToday,

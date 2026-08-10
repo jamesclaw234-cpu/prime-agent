@@ -166,7 +166,26 @@ export class BinanceRestClient {
 		const signed = options.signed ?? false;
 		if (signed && !this.hasCredentials) throw new MissingCredentialsError(path);
 
-		await this.options.limiter.acquire({ ...budgets, [RAW_REQUESTS]: 1 }, options.signal);
+		// The timeout is armed BEFORE queuing, so the caller's budget covers the wait as well as the
+		// request. Otherwise a 429 penalty parks an order in the limiter for a full minute and then
+		// sends it at a price derived from a book that was checked for freshness a minute ago.
+		const timeout = AbortSignal.timeout(this.options.timeoutMs);
+		const signal = options.signal ? AbortSignal.any([timeout, options.signal]) : timeout;
+
+		try {
+			await this.options.limiter.acquire({ ...budgets, [RAW_REQUESTS]: 1 }, signal);
+		} catch (error) {
+			throw new BinanceApiError(
+				BINANCE_ERROR.TOO_MANY_REQUESTS,
+				`rate limit wait exceeded the request budget: ${error instanceof Error ? error.message : String(error)}`,
+				429,
+				path,
+				this.options.limiter.penaltyRemainingMs,
+			);
+		}
+		if (signal.aborted) {
+			throw new BinanceApiError(BINANCE_ERROR.TOO_MANY_REQUESTS, "request budget elapsed while queued", 429, path);
+		}
 
 		let query = this.buildQuery(
 			signed ? { ...params, timestamp: this.clock.timestamp(), recvWindow: this.options.recvWindowMs } : params,
@@ -179,9 +198,6 @@ export class BinanceRestClient {
 			if (!this.options.apiKey) throw new MissingCredentialsError(path);
 			headers["X-MBX-APIKEY"] = this.options.apiKey;
 		}
-
-		const timeout = AbortSignal.timeout(this.options.timeoutMs);
-		const signal = options.signal ? AbortSignal.any([timeout, options.signal]) : timeout;
 
 		const startedAt = this.now();
 		let response: Response;

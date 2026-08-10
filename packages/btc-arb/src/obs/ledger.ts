@@ -62,8 +62,14 @@ export class Ledger {
 		if (options.file) {
 			try {
 				mkdirSync(dirname(options.file), { recursive: true });
-			} catch {
+			} catch (error) {
+				// Losing the audit trail silently is worse than losing it loudly: the ledger is the
+				// only durable record of what the bot actually traded.
 				this.fileBroken = true;
+				this.logger.error("ledger directory is not writable; no trade record will be persisted", {
+					file: options.file,
+					error: (error as Error).message,
+				});
 			}
 		}
 	}
@@ -139,6 +145,7 @@ export class Ledger {
 			accountingAsset: this.options.accountingAsset,
 			strandedAsset: result.strandedAsset,
 			strandedAmount: result.strandedAmount ? decToString(result.strandedAmount) : undefined,
+			needsReconciliation: result.needsReconciliation,
 			error: result.error,
 			legs: result.fills.map((fill) => ({
 				symbol: fill.leg.symbol,

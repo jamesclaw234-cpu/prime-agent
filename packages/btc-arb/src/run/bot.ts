@@ -407,7 +407,11 @@ export class ArbBot {
 			this.timers.push(timer);
 		};
 
-		add(
+		// Deliberately NOT unref'd, unlike every other timer here. An open WebSocket is otherwise the
+		// only ref'd handle in steady state, so during any window where all shards are closed and
+		// waiting on their reconnect timers the event loop would drain and a 24/7 bot would exit
+		// with status 0 as though it had finished its work.
+		const health = setInterval(
 			() => {
 				this.risk.checkKillSwitch();
 				const healthy = this.feed?.healthy ?? false;
@@ -416,6 +420,7 @@ export class ArbBot {
 			},
 			Math.max(250, this.config.risk.killSwitchPollMs),
 		);
+		this.timers.push(health);
 
 		add(() => {
 			void this.refreshBalances();

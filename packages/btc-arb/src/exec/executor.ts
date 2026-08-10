@@ -19,6 +19,8 @@ export interface ExecutorOptions {
 	readonly maxBookAgeMs: number;
 	readonly logger?: Logger;
 	readonly now?: () => number;
+	/** Called immediately before every outbound order, including unwind retries. */
+	readonly onOrderSent?: () => void;
 }
 
 interface LegAttempt {
@@ -68,6 +70,9 @@ export class CycleExecutor {
 		let executedLegs = 0;
 		let outcome: CycleOutcome = "completed";
 		let error: string | undefined;
+		let needsReconciliation = false;
+		/** Amount left behind in a leg's input asset when that leg only partially consumed it. */
+		const residuals: { legIndex: number; asset: string; amount: Dec }[] = [];
 
 		for (let index = 0; index < legs.length; index++) {
 			const leg = legs[index].leg;
@@ -85,7 +90,15 @@ export class CycleExecutor {
 			} catch (caught) {
 				error = caught instanceof Error ? caught.message : String(caught);
 				outcome = "error";
-				this.logger.error("leg failed", { cycle: opportunity.cycle.id, leg: index + 1, error });
+				// An ambiguous failure may have executed. We no longer know which asset we hold, so
+				// any unwind would be a guess - and a wrong guess trades inventory we do not have.
+				needsReconciliation = caught instanceof BinanceApiError && caught.ambiguous;
+				this.logger.error("leg failed", {
+					cycle: opportunity.cycle.id,
+					leg: index + 1,
+					ambiguous: needsReconciliation,
+					error,
+				});
 				break;
 			}
 
@@ -102,7 +115,16 @@ export class CycleExecutor {
 				break;
 			}
 
-			if (index === 0) actualAmountIn = attempt.fill.amountIn;
+			if (index === 0) {
+				actualAmountIn = attempt.fill.amountIn;
+			} else {
+				// A partial fill leaves the unconsumed part of the previous leg's output sitting in
+				// an intermediate asset. Left unrecorded it becomes an invisible position and the
+				// cycle books a loss that never happened, so it is retraced back to the start asset
+				// once the main path is done.
+				const residual = decSub(heldAmount, attempt.fill.amountIn);
+				if (decIsPositive(residual)) residuals.push({ legIndex: index, asset: leg.fromAsset, amount: residual });
+			}
 			heldAsset = leg.toAsset;
 			heldAmount = attempt.amountOut;
 			executedLegs = index + 1;
@@ -115,20 +137,56 @@ export class CycleExecutor {
 
 		const startAsset = opportunity.cycle.startAsset;
 		const completedAllLegs = executedLegs === legs.length && outcome === "completed";
-		if (!completedAllLegs && executedLegs > 0 && this.options.unwind.enabled) {
+
+		// Unwinding after an ambiguous failure would trade against a position we cannot confirm.
+		// Freezing and handing it to the operator is the only safe response.
+		const canUnwind = this.options.unwind.enabled && !needsReconciliation;
+		if (!completedAllLegs && executedLegs > 0 && canUnwind) {
 			const result = await this.unwind(legs, executedLegs, heldAsset, heldAmount, unwindFills, signal);
 			heldAsset = result.asset;
 			heldAmount = result.amount;
-			if (result.ambiguous) {
-				// The operator has to reconcile this by hand: an order that may or may not have
-				// executed leaves the true position unknown until the exchange is queried.
-				error = "unwind failed ambiguously; position may be inconsistent, reconcile manually";
+			if (result.ambiguous) needsReconciliation = true;
+		}
+
+		// Retrace each partial-fill residual back to the start asset. Each one sits in the input
+		// asset of the leg that under-consumed it, so the path back is that leg's predecessors.
+		let recoveredResidual = ZERO;
+		if (canUnwind && !needsReconciliation) {
+			for (const residual of residuals) {
+				const result = await this.unwind(
+					legs,
+					residual.legIndex,
+					residual.asset,
+					residual.amount,
+					unwindFills,
+					signal,
+				);
+				if (result.ambiguous) {
+					needsReconciliation = true;
+					break;
+				}
+				if (result.asset === startAsset) {
+					recoveredResidual = (recoveredResidual + result.amount) as Dec;
+				} else {
+					this.logger.warn("partial-fill residual could not be retraced", {
+						asset: result.asset,
+						amount: decToNumber(result.amount),
+					});
+				}
 			}
+		}
+
+		if (needsReconciliation) {
+			// Keep the underlying cause and append the instruction: the operator needs both the
+			// exchange's own message and to know that the recorded position cannot be trusted.
+			const note = "position may be inconsistent, reconcile manually";
+			error = error ? `${error} (${note})` : `an order failed ambiguously; ${note}`;
 		}
 
 		// Nothing is recovered unless a leg actually executed. `heldAmount` starts at the *intended*
 		// spend, so counting it when leg 1 never filled would book a phantom profit.
-		const recovered = executedLegs > 0 && heldAsset === startAsset ? heldAmount : ZERO;
+		const recovered =
+			executedLegs > 0 && heldAsset === startAsset ? ((heldAmount + recoveredResidual) as Dec) : recoveredResidual;
 		const strandedAsset = executedLegs > 0 && heldAsset !== startAsset ? heldAsset : undefined;
 
 		if (completedAllLegs) {
@@ -158,6 +216,7 @@ export class CycleExecutor {
 			strandedAmount: strandedAsset ? heldAmount : undefined,
 			expectedProfit: opportunity.expectedProfit,
 			slippage: decSub(realizedPnl, opportunity.expectedProfit),
+			needsReconciliation,
 			error,
 		};
 
@@ -215,6 +274,7 @@ export class CycleExecutor {
 			return undefined;
 		}
 
+		this.options.onOrderSent?.();
 		const outcome = await this.options.engine.placeIoc(
 			{ symbol: leg.symbol, side: leg.side, price, quantity, rules, clientOrderId: newClientOrderId() },
 			signal,
@@ -364,6 +424,7 @@ export class CycleExecutor {
 		const check = validateLimitOrder(rules, leg.side, price, quantity, leg.side === "BUY" ? book.ask : book.bid);
 		if (!check.ok) return undefined;
 
+		this.options.onOrderSent?.();
 		const outcome = await this.options.engine.placeIoc(
 			{ symbol: leg.symbol, side: leg.side, price, quantity, rules, clientOrderId: newClientOrderId("arbu") },
 			signal,

@@ -207,5 +207,12 @@ export interface CycleResult {
 	readonly expectedProfit: Dec;
 	/** `realizedPnl - expectedProfit`: how much worse reality was than the signal. */
 	readonly slippage: Dec;
+	/**
+	 * An order failed in a way that leaves it unknown whether it executed.
+	 *
+	 * The recorded position cannot be trusted until the account is queried, so the supervisor
+	 * halts on this rather than continuing to trade against a guess.
+	 */
+	readonly needsReconciliation: boolean;
 	readonly error?: string;
 }

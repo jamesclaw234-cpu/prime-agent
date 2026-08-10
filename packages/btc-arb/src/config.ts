@@ -347,7 +347,28 @@ function applyTestnet(config: ArbConfig): ArbConfig {
 	if (!config.binance.testnet) return config;
 	const rest = config.binance.restBaseUrl === BINANCE_MAINNET_REST ? BINANCE_TESTNET_REST : config.binance.restBaseUrl;
 	const ws = config.binance.wsBaseUrl === BINANCE_MAINNET_WS ? BINANCE_TESTNET_WS : config.binance.wsBaseUrl;
+	// Swapping the two independently is how a run ends up placing real mainnet orders priced off
+	// testnet market data, or the reverse. Pinning one host for latency and leaving the other at its
+	// default is an ordinary thing to do, and would silently straddle two exchanges.
+	for (const [key, url] of [
+		["binance.restBaseUrl", rest],
+		["binance.wsBaseUrl", ws],
+	] as const) {
+		if (!isTestnetHost(url)) {
+			throw new ConfigError(
+				`testnet is enabled but ${key} points at ${url}; pin both hosts to the testnet or neither`,
+			);
+		}
+	}
 	return { ...config, binance: { ...config.binance, restBaseUrl: rest, wsBaseUrl: ws } };
+}
+
+function isTestnetHost(url: string): boolean {
+	try {
+		return new URL(url).hostname.includes("testnet");
+	} catch {
+		return false;
+	}
 }
 
 function requirePositive(value: number, path: string): void {
@@ -379,14 +400,22 @@ export function validateConfig(config: ArbConfig): void {
 	if (config.binance.streamsPerConnection < 1 || config.binance.streamsPerConnection > 200) {
 		throw new ConfigError("binance.streamsPerConnection must be between 1 and 200");
 	}
-	for (const [key, url] of [
-		["binance.restBaseUrl", config.binance.restBaseUrl],
-		["binance.wsBaseUrl", config.binance.wsBaseUrl],
+	for (const [key, url, secure] of [
+		["binance.restBaseUrl", config.binance.restBaseUrl, "https:"],
+		["binance.wsBaseUrl", config.binance.wsBaseUrl, "wss:"],
 	] as const) {
+		let parsed: URL;
 		try {
-			new URL(url);
+			parsed = new URL(url);
 		} catch {
 			throw new ConfigError(`${key} is not a valid URL: ${JSON.stringify(url)}`);
+		}
+		// Signed requests carry the API key header and the HMAC signature; a plaintext endpoint puts
+		// both on the wire. A config file is exactly the kind of thing that gets committed, so this
+		// is checked rather than trusted.
+		const localhost = parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1";
+		if (parsed.protocol !== secure && !localhost) {
+			throw new ConfigError(`${key} must use ${secure} (got ${parsed.protocol}) unless it points at localhost`);
 		}
 	}
 

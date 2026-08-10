@@ -362,3 +362,89 @@ describe("against the paper engine", () => {
 		expect(decToNumber(result.realizedPnl)).toBeGreaterThan(0);
 	});
 });
+
+describe("partial fill on a middle leg", () => {
+	/**
+	 * Regression: leg 2 under-consuming what leg 1 produced used to abandon the remainder.
+	 *
+	 * The cycle then reported a large loss it had not taken, while the unconverted inventory sat
+	 * in the account invisibly. Both halves of that matter: the PnL was wrong and the position
+	 * was unknown.
+	 */
+	it("retraces the unconverted remainder back to the start asset", async () => {
+		const engine = new ScriptedEngine([fullFill, partialFill("0.4"), fullFill, fullFill]);
+		const result = await makeExecutor(engine).execute(buildOpportunity());
+
+		expect(result.outcome).toBe("completed");
+		expect(result.strandedAsset).toBeUndefined();
+
+		// The 60% of leg 1's BTC that leg 2 could not absorb is sold back to USDT.
+		expect(result.unwindFills).toHaveLength(1);
+		expect(result.unwindFills[0].leg.symbol).toBe("BTCUSDT");
+		expect(result.unwindFills[0].leg.side).toBe("SELL");
+
+		// Recovered output is the converted path plus the retraced remainder, so the cycle does not
+		// book the whole input as a loss.
+		expect(decToNumber(result.amountOut)).toBeGreaterThan(decToNumber(result.amountIn) * 0.9);
+	});
+
+	it("books a phantom loss if the remainder is ignored", async () => {
+		// Guards the assertion above: with the retrace disabled, the same cycle reports a loss of
+		// roughly the unconverted share of the input.
+		const engine = new ScriptedEngine([fullFill, partialFill("0.4"), fullFill]);
+		const executor = new CycleExecutor({
+			engine,
+			store: makeStore(PROFITABLE, NOW),
+			rules: RULES,
+			fee: FEE_10BPS,
+			cycleDeadlineMs: 3000,
+			aggressionTicks: 0,
+			unwind: { ...UNWIND, enabled: false },
+			maxBookAgeMs: 5000,
+			now: () => NOW,
+		});
+		const result = await executor.execute(buildOpportunity());
+		expect(result.unwindFills).toHaveLength(0);
+		expect(decToNumber(result.amountOut)).toBeLessThan(decToNumber(result.amountIn) * 0.9);
+	});
+});
+
+describe("ambiguous order failures", () => {
+	/**
+	 * Regression: an ambiguous leg failure used to be treated as a definite non-fill, after which
+	 * the executor immediately traded against inventory it might no longer hold.
+	 */
+	it("does not unwind after a leg fails ambiguously", async () => {
+		const engine = new ScriptedEngine([
+			fullFill,
+			() => new BinanceApiError(BINANCE_ERROR.TIMEOUT, "Timeout waiting for response", 504, "/api/v3/order"),
+		]);
+		const result = await makeExecutor(engine).execute(buildOpportunity());
+
+		expect(result.outcome).toBe("error");
+		expect(result.needsReconciliation).toBe(true);
+		// Only leg 1 and the failed leg 2 were sent; no reversing order followed.
+		expect(engine.requests).toHaveLength(2);
+		expect(result.unwindFills).toHaveLength(0);
+		expect(result.error).toContain("reconcile manually");
+	});
+
+	it("still unwinds after a leg fails definitively", async () => {
+		const engine = new ScriptedEngine([
+			fullFill,
+			() => new BinanceApiError(BINANCE_ERROR.FILTER_FAILURE, "Filter failure: LOT_SIZE", 400, "/api/v3/order"),
+			fullFill,
+		]);
+		const result = await makeExecutor(engine).execute(buildOpportunity());
+
+		expect(result.needsReconciliation).toBe(false);
+		expect(result.unwindFills.length).toBeGreaterThan(0);
+		expect(result.strandedAsset).toBeUndefined();
+	});
+
+	it("reports no reconciliation need on a clean cycle", async () => {
+		const engine = new ScriptedEngine([fullFill, fullFill, fullFill]);
+		const result = await makeExecutor(engine).execute(buildOpportunity());
+		expect(result.needsReconciliation).toBe(false);
+	});
+});

@@ -203,6 +203,7 @@ function makeResult(outcome: CycleOutcome, pnl: string, overrides: Partial<Cycle
 		realizedPnlAsset: "USDT",
 		expectedProfit: d("2"),
 		slippage: decFromString(String(Number(pnl) - 2)),
+		needsReconciliation: false,
 		...overrides,
 	};
 }

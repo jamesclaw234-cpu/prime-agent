@@ -70,16 +70,51 @@ describe("loading", () => {
 		expect(config.binance.apiSecret).toBe("s");
 	});
 
-	it("switches hosts for testnet without clobbering an explicit override", () => {
+	it("switches both hosts for testnet", () => {
 		const testnet = loadConfig({ env: { ARB_TESTNET: "1" } });
 		expect(testnet.binance.restBaseUrl).toBe(BINANCE_TESTNET_REST);
 		expect(testnet.binance.wsBaseUrl).toBe(BINANCE_TESTNET_WS);
+	});
 
-		const pinned = loadConfig({
+	it("refuses a testnet run that straddles two environments", () => {
+		// Pinning one host for latency and leaving the other at its default is an ordinary thing to
+		// do, and would otherwise place real mainnet orders priced off testnet market data.
+		expect(() =>
+			loadConfig({
+				env: { ARB_TESTNET: "1" },
+				overrides: { binance: { restBaseUrl: "https://api-gcp.binance.com" } },
+			}),
+		).toThrow(/straddle|pin both hosts/);
+	});
+
+	it("accepts a testnet run with both hosts pinned to testnet", () => {
+		const config = loadConfig({
 			env: { ARB_TESTNET: "1" },
-			overrides: { binance: { restBaseUrl: "https://custom.example" } },
+			overrides: {
+				binance: {
+					restBaseUrl: "https://testnet.binance.vision",
+					wsBaseUrl: "wss://stream.testnet.binance.vision",
+				},
+			},
 		});
-		expect(pinned.binance.restBaseUrl).toBe("https://custom.example");
+		expect(config.binance.restBaseUrl).toContain("testnet");
+		expect(config.binance.wsBaseUrl).toContain("testnet");
+	});
+
+	it("refuses a plaintext endpoint, which would put the API key and signature on the wire", () => {
+		expect(() => loadConfig({ env: {}, overrides: { binance: { restBaseUrl: "http://api.binance.com" } } })).toThrow(
+			/must use https:/,
+		);
+		expect(() => loadConfig({ env: {}, overrides: { binance: { wsBaseUrl: "ws://stream.binance.com" } } })).toThrow(
+			/must use wss:/,
+		);
+		// A local mock server is the one legitimate plaintext case.
+		expect(() =>
+			loadConfig({
+				env: {},
+				overrides: { binance: { restBaseUrl: "http://localhost:8080", wsBaseUrl: "ws://127.0.0.1:8081" } },
+			}),
+		).not.toThrow();
 	});
 
 	it("rejects an invalid ARB_MODE", () => {

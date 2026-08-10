@@ -57,6 +57,7 @@ function makeResult(outcome: CycleOutcome, overrides: Partial<CycleResult> = {})
 		realizedPnlAsset: "USDT",
 		expectedProfit: d("2"),
 		slippage: d("-2"),
+		needsReconciliation: false,
 		...overrides,
 	};
 }
@@ -262,5 +263,49 @@ describe("day rollover", () => {
 		risk.resume();
 		expect(risk.isHalted).toBe(false);
 		expect(risk.canStartCycle(OPPORTUNITY).allowed).toBe(true);
+	});
+});
+
+describe("halt reasons", () => {
+	it("keeps a second halt reason raised across the UTC rollover", () => {
+		// Regression: halt() used to discard a new reason when already halted, and the rollover
+		// then lifted the halt because it only inspected the first reason recorded.
+		let now = Date.UTC(2026, 0, 1, 14, 0, 0);
+		const risk = makeManager({ maxDailyLoss: 10, minTimeBetweenCyclesMs: 0 }, () => now);
+		risk.onCycleStart(OPPORTUNITY);
+		risk.onCycleResult(makeResult("completed"), decFromString("-20"));
+		expect(risk.isHalted).toBe(true);
+
+		risk.halt("ambiguous order failure: manual reconciliation required");
+
+		now = Date.UTC(2026, 0, 2, 1, 0, 0);
+		expect(risk.canStartCycle(OPPORTUNITY).allowed).toBe(false);
+		expect(risk.isHalted).toBe(true);
+		expect(risk.reason).toContain("reconciliation");
+		// The daily-loss counters still reset; only that one reason is day-scoped.
+		expect(risk.snapshot().dailyPnl).toBe(0);
+	});
+
+	it("lifts a daily-loss halt at the rollover when it is the only reason", () => {
+		let now = Date.UTC(2026, 0, 1, 23, 0, 0);
+		const risk = makeManager({ maxDailyLoss: 10, minTimeBetweenCyclesMs: 0 }, () => now);
+		risk.onCycleStart(OPPORTUNITY);
+		risk.onCycleResult(makeResult("completed"), decFromString("-20"));
+		now = Date.UTC(2026, 0, 2, 1, 0, 0);
+		expect(risk.canStartCycle(OPPORTUNITY).allowed).toBe(true);
+	});
+});
+
+describe("order accounting", () => {
+	it("counts orders beyond the cycle's planned legs", () => {
+		const risk = makeManager({ maxOrdersPerSecond: 6, minTimeBetweenCyclesMs: 0 });
+		risk.setMaxConcurrentCycles(10);
+		risk.onCycleStart(OPPORTUNITY);
+		// The three planned legs are already reserved, so these are free.
+		for (let i = 0; i < 3; i++) risk.recordOrder();
+		expect(risk.canStartCycle(OPPORTUNITY).allowed).toBe(true);
+		// Unwind retries are surplus and must consume the budget.
+		for (let i = 0; i < 4; i++) risk.recordOrder();
+		expect(risk.canStartCycle(OPPORTUNITY).allowed).toBe(false);
 	});
 });

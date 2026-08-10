@@ -242,9 +242,14 @@ function simulateForward(
 		if (!decIsPositive(price)) return `leg ${index + 1}: non-positive price`;
 		if (!decIsPositive(amount)) return `leg ${index + 1}: nothing left to trade`;
 
-		const rawQty = leg.side === "SELL" ? amount : decDiv(amount, price);
+		// A BUY is funded at the price we send, not the price we hope to fill at: Binance locks
+		// quantity x limitPrice. Sizing off the touch while sending a limit two ticks above it can
+		// ask for more quote asset than the leg was funded with, which the exchange rejects with
+		// -2010 after the previous leg has already executed.
+		const fundingPrice = leg.side === "BUY" ? context.limitPrice : price;
+		const rawQty = leg.side === "SELL" ? amount : decDiv(amount, fundingPrice);
 		let quantity = roundQtyDown(context.rules, rawQty);
-		quantity = maxCompliantQty(context.rules, price, quantity);
+		quantity = maxCompliantQty(context.rules, fundingPrice, quantity);
 		if (!decIsPositive(quantity)) return `leg ${index + 1}: quantity rounds to zero at this size`;
 		if (decIsPositive(context.rules.minQty) && decLt(quantity, context.rules.minQty)) {
 			return `leg ${index + 1}: quantity below LOT_SIZE minQty`;
@@ -257,6 +262,10 @@ function simulateForward(
 
 		const spent = leg.side === "SELL" ? quantity : notional;
 		if (decGt(spent, amount)) return `leg ${index + 1}: rounding produced an overspend`;
+		// The worst case has to fit too, or the order is unfundable the moment the touch moves.
+		if (leg.side === "BUY" && decGt(decMul(context.limitPrice, quantity), amount)) {
+			return `leg ${index + 1}: quantity is unaffordable at the limit price`;
+		}
 
 		const received =
 			leg.side === "SELL" ? decMul(notional, fee.takerMultiplier) : decMul(quantity, fee.takerMultiplier);
