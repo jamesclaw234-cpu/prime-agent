@@ -190,12 +190,21 @@ export class BinanceRestClient {
 		try {
 			await this.options.limiter.acquire({ ...budgets, [RAW_REQUESTS]: 1 }, signal);
 		} catch (error) {
+			// Name the budget that ran out. "Rate limited" on its own sends an operator hunting
+			// through four windows and a penalty timer to find which one, and the answer changes what
+			// they should do about it.
+			const usage = Object.entries(this.options.limiter.snapshot())
+				.filter(([name]) => (budgets[name] ?? 0) > 0)
+				.map(([name, window]) => `${name} ${window.used}/${window.limit}`)
+				.join(", ");
+			const penalty = this.options.limiter.penaltyRemainingMs;
 			throw new BinanceApiError(
 				BINANCE_ERROR.TOO_MANY_REQUESTS,
-				`rate limit wait exceeded the request budget: ${error instanceof Error ? error.message : String(error)}`,
+				`rate limit wait exceeded the request budget: ${error instanceof Error ? error.message : String(error)}` +
+					` [${usage}${penalty > 0 ? `, backing off for ${penalty}ms` : ""}]`,
 				429,
 				path,
-				this.options.limiter.penaltyRemainingMs,
+				penalty,
 			);
 		}
 		if (signal.aborted) {

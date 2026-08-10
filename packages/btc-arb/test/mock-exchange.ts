@@ -67,7 +67,24 @@ async function main(): Promise<void> {
 		},
 	});
 
-	const { restBaseUrl, wsBaseUrl } = await fake.start(PORT);
+	let hosts: { restBaseUrl: string; wsBaseUrl: string };
+	try {
+		hosts = await fake.start(PORT);
+	} catch (error) {
+		// Worth its own message. A leftover server from an earlier session keeps answering on this
+		// port, and the bot then trades against stale state while this process dies in the
+		// background - which reads as a bug in the bot rather than a stray process.
+		if ((error as NodeJS.ErrnoException).code === "EADDRINUSE") {
+			process.stderr.write(
+				`\n  port ${PORT} is already in use - most likely a mock exchange from an earlier run.\n` +
+					`  Stop it first, or start this one on another port and override the hosts:\n\n` +
+					`    npx tsx test/mock-exchange.ts 8081\n\n`,
+			);
+			process.exit(1);
+		}
+		throw error;
+	}
+	const { restBaseUrl, wsBaseUrl } = hosts;
 
 	process.stdout.write(
 		[

@@ -120,7 +120,15 @@ export class FakeBinance {
 	private updateId = 1;
 	private usedWeight = 0;
 	private pinnedWeight = false;
-	private orderCount = 0;
+	/**
+	 * Placement times, so the count headers can be windowed the way the exchange's are.
+	 *
+	 * Reporting a cumulative total instead is not a harmless simplification: the client adopts these
+	 * counters as the authority on its remaining budget, so a number that only ever grows drives the
+	 * limiter into a permanent block after a few dozen orders and every later cycle fails on a
+	 * timeout that looks exactly like a bot bug.
+	 */
+	private readonly orderTimes: number[] = [];
 	private pendingFailures: { remaining: number; failure: OrderFailure } | undefined;
 
 	/** Every order placement attempt, including ones the fake refused. */
@@ -477,7 +485,7 @@ export class FakeBinance {
 			status,
 		};
 		this.orders.set(clientOrderId, order);
-		this.orderCount++;
+		this.orderTimes.push(Date.now());
 		record(status, order.executedQty);
 
 		// The order is on the book; only the reply is lost. Reconciling by client id is the caller's
@@ -611,13 +619,21 @@ export class FakeBinance {
 		}));
 	}
 
+	/** Orders placed in the trailing window, matching how the exchange reports its own counts. */
+	private ordersWithin(windowMs: number): number {
+		const cutoff = Date.now() - windowMs;
+		let count = 0;
+		for (let i = this.orderTimes.length - 1; i >= 0 && this.orderTimes[i] >= cutoff; i--) count++;
+		return count;
+	}
+
 	private ok(res: ServerResponse, body: unknown): void {
 		if (!this.pinnedWeight) this.usedWeight += 1;
 		res.writeHead(200, {
 			"content-type": "application/json;charset=UTF-8",
 			"x-mbx-used-weight-1m": String(this.usedWeight),
-			"x-mbx-order-count-10s": String(this.orderCount),
-			"x-mbx-order-count-1d": String(this.orderCount),
+			"x-mbx-order-count-10s": String(this.ordersWithin(10_000)),
+			"x-mbx-order-count-1d": String(this.ordersWithin(86_400_000)),
 		});
 		res.end(JSON.stringify(body));
 	}

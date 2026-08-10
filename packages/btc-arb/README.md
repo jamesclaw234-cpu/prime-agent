@@ -23,8 +23,8 @@ This package is built to measure that honestly rather than to hide it:
   book, and the second price level is exactly where a few-basis-point edge stops existing.
 - Cycles are re-derived in exact decimal arithmetic after lot rounding, because a 12bps gross edge
   can round into a loss on a coarse lot grid.
-- The lot grid itself is a cost, and at small notionals it is the dominant one — around 68bps on a
-  $100 cycle, which is several times any edge that exists. See
+- The lot grid itself is a cost, and at small notionals it is the dominant one — measured at
+  ~42bps on a $100 cycle, several times any edge that exists. See
   [sizing for the lot grid](#size-the-cycle-for-the-lot-grid-not-for-your-risk-appetite); the fee
   is not the reason a small cycle loses money.
 - The paper engine models latency, partial fills, adverse selection and outright misses, and it
@@ -260,26 +260,32 @@ than any real book's.
 
 The most expensive thing about a small triangular cycle is not the fee — it is the lot step.
 
-Commission is deducted from the asset you receive, so every intermediate leg lands off the next
-symbol's `stepSize` grid and the remainder cannot be forwarded or sold: it is below `minQty`. That
-dust stays in the account, so it is not lost, but it is not working either, and the cycle's PnL is
-reported without it. Expect roughly half a step per intermediate asset, per cycle.
+Commission is deducted from the asset you receive, so every intermediate leg's output lands off
+the *next* symbol's `stepSize` grid. The quantity rounds down, and the remainder cannot be
+forwarded or sold: it is below `minQty`. That dust stays in the account, so it is not lost, but it
+is not working either, and the cycle's PnL is reported without it.
 
-Half a step is a fixed cost, so its cost *in basis points* is set entirely by the notional:
+The remainder in each intermediate asset is bounded by **one `stepSize` of the next symbol**,
+valued in that asset — so expect about half of that per intermediate asset, per cycle. On
+`USDT→BTC→ETH→USDT` both intermediates are bounded by a `0.0001` ETH step: about $0.35 each at
+$3,500 ETH, so roughly $0.35 of dust per cycle.
+
+That is a *fixed* cost, so its cost in basis points is set entirely by the notional:
 
 | notional per cycle | dust drag on a USDT→BTC→ETH→USDT cycle |
 | ------------------ | -------------------------------------- |
-| $100               | ~68 bps                                |
-| $1,000             | ~7 bps                                 |
-| $10,000            | ~0.7 bps                               |
+| $100               | ~42 bps                                |
+| $1,000             | ~4 bps                                 |
+| $10,000            | ~0.4 bps                               |
 
-BTCUSDT's step is `0.00001` BTC, which is about a dollar. On a $100 cycle that single step is
-100bps — several times any edge that actually exists. **At the shipped `maxNotionalPerCycle` the
-lot grid costs more than the strategy earns.** The defaults are sized to make a mistake cheap
-while you are learning the system, not to make money; raising the notional is what makes the
-arithmetic work, and that is a decision about risk, not a tuning knob to turn casually.
+Those are measured, not derived: 24 consecutive completed cycles against the mock exchange
+averaged $0.419 of dust on a $99 cycle, against $0.441 of realised profit. **At the shipped
+`maxNotionalPerCycle`, dust is the same order of magnitude as everything the strategy earns.**
+The defaults are sized to make a mistake cheap while you are learning the system, not to make
+money; raising the notional is what makes the arithmetic work, and that is a decision about risk,
+not a tuning knob to turn casually.
 
-Cycles are logged with their dust, so this is measurable rather than theoretical:
+Cycles are logged with their dust, so this stays measurable on your own book:
 
 ```
 cycle finished cycle=USDT>BTC>ETH>USDT outcome=completed pnl=0.452 dust={"BTC":0.0000016,"ETH":0.0000715}
