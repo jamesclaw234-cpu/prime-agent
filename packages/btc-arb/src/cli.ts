@@ -1,6 +1,7 @@
 #!/usr/bin/env node
-import { createReadStream } from "node:fs";
+import { createReadStream, realpathSync } from "node:fs";
 import { createInterface } from "node:readline";
+import { fileURLToPath } from "node:url";
 import { parseExchangeInfo } from "./binance/filters.js";
 import { DEFAULT_LIMITS, RateLimiter } from "./binance/rate-limiter.js";
 import { BinanceRestClient } from "./binance/rest-client.js";
@@ -514,9 +515,24 @@ export async function main(argv: readonly string[]): Promise<number> {
 	}
 }
 
-// `process.argv[1]` is the script path; anything after it is ours.
-const invokedDirectly = process.argv[1]?.includes("cli");
-if (invokedDirectly) {
+/**
+ * True only when this file is the process entry point.
+ *
+ * Compared by resolved real path rather than by name: a test runner's own entry point is often
+ * also called `cli.js`, and a substring check would auto-run the whole bot inside the test suite.
+ * Symlinks are resolved on both sides so a `node_modules/.bin` shim still matches.
+ */
+function isEntryPoint(): boolean {
+	const entry = process.argv[1];
+	if (!entry) return false;
+	try {
+		return realpathSync(entry) === realpathSync(fileURLToPath(import.meta.url));
+	} catch {
+		return false;
+	}
+}
+
+if (isEntryPoint()) {
 	main(process.argv.slice(2))
 		.then((code) => {
 			if (code !== 0) process.exitCode = code;
