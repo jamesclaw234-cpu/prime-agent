@@ -40,7 +40,19 @@ export interface ExecutionEngine {
 	placeIoc(request: OrderRequest, signal?: AbortSignal): Promise<OrderOutcome>;
 	/** Current spendable balances. Live engines read the account; the paper engine tracks its own. */
 	balances(): Promise<ReadonlyMap<Asset, Dec>>;
+	/**
+	 * Looks up an order whose placement failed ambiguously.
+	 *
+	 * Querying is safe where retrying is not: it can only tell us what happened. Returns an outcome
+	 * with status `NOT_PLACED` when the exchange proves the order never reached the book, a real
+	 * outcome when it did, and `undefined` when the question could not be answered - which is the
+	 * one case that genuinely requires a human.
+	 */
+	resolveOrder?(symbol: MarketSymbol, clientOrderId: string, signal?: AbortSignal): Promise<OrderOutcome | undefined>;
 }
+
+/** Status used for an order the exchange confirms never existed. */
+export const NOT_PLACED = "NOT_PLACED";
 
 export interface SettledLeg {
 	/** Amount of `leg.fromAsset` actually spent. */

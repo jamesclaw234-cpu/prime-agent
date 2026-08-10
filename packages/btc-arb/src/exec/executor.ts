@@ -6,7 +6,7 @@ import { aggressivePrice, edgeRateNum, type FeeModel } from "../core/pricing.js"
 import type { CycleLeg, CycleOutcome, CycleResult, LegFill, MarketSymbol, Opportunity, SymbolRules } from "../types.js";
 import { type Dec, decDiv, decIsPositive, decLt, decMul, decSub, decToNumber, ZERO } from "../util/decimal.js";
 import { type Logger, silentLogger } from "../util/logger.js";
-import { type ExecutionEngine, newClientOrderId, settleLeg } from "./engine.js";
+import { type ExecutionEngine, NOT_PLACED, newClientOrderId, settleLeg } from "./engine.js";
 
 export interface ExecutorOptions {
 	readonly engine: ExecutionEngine;
@@ -84,19 +84,30 @@ export class CycleExecutor {
 				break;
 			}
 
+			// Generated up front so an ambiguous failure can still be looked up by client id.
+			const clientOrderId = newClientOrderId();
 			let attempt: LegAttempt | undefined;
 			try {
-				attempt = await this.runLeg(leg, index === 0 ? legs[index].quantity : undefined, heldAmount, signal);
+				attempt = await this.runLeg(
+					leg,
+					index === 0 ? legs[index].quantity : undefined,
+					heldAmount,
+					clientOrderId,
+					signal,
+				);
 			} catch (caught) {
 				error = caught instanceof Error ? caught.message : String(caught);
 				outcome = "error";
-				// An ambiguous failure may have executed. We no longer know which asset we hold, so
-				// any unwind would be a guess - and a wrong guess trades inventory we do not have.
-				needsReconciliation = caught instanceof BinanceApiError && caught.ambiguous;
+				const ambiguous = caught instanceof BinanceApiError && caught.ambiguous;
+				// An ambiguous failure may have executed. Asking the exchange what happened is safe
+				// where re-sending is not, and in the common case it proves the order never landed,
+				// which turns a halt back into an ordinary missed leg.
+				needsReconciliation = ambiguous && !(await this.provenNotPlaced(leg, clientOrderId, signal));
 				this.logger.error("leg failed", {
 					cycle: opportunity.cycle.id,
 					leg: index + 1,
-					ambiguous: needsReconciliation,
+					ambiguous,
+					resolved: ambiguous && !needsReconciliation,
 					error,
 				});
 				break;
@@ -243,6 +254,7 @@ export class CycleExecutor {
 		leg: CycleLeg,
 		fixedQuantity: Dec | undefined,
 		available: Dec,
+		clientOrderId: string,
 		signal?: AbortSignal,
 	): Promise<LegAttempt | undefined> {
 		const rules = this.options.rules.get(leg.symbol);
@@ -276,7 +288,7 @@ export class CycleExecutor {
 
 		this.options.onOrderSent?.();
 		const outcome = await this.options.engine.placeIoc(
-			{ symbol: leg.symbol, side: leg.side, price, quantity, rules, clientOrderId: newClientOrderId() },
+			{ symbol: leg.symbol, side: leg.side, price, quantity, rules, clientOrderId },
 			signal,
 		);
 		const settled = settleLeg(leg, outcome);
@@ -301,6 +313,24 @@ export class CycleExecutor {
 			filled: decIsPositive(outcome.executedQty) && decIsPositive(settled.amountOut),
 			amountOut: settled.amountOut,
 		};
+	}
+
+	/**
+	 * Asks the exchange whether an order that failed ambiguously actually reached the book.
+	 *
+	 * Only a definite "it never existed" is treated as an answer. A found order, an engine with no
+	 * resolver, or a query that itself fails all leave the position uncertain, which is exactly the
+	 * situation a human is supposed to look at.
+	 */
+	private async provenNotPlaced(leg: CycleLeg, clientOrderId: string, signal?: AbortSignal): Promise<boolean> {
+		const resolve = this.options.engine.resolveOrder?.bind(this.options.engine);
+		if (!resolve) return false;
+		try {
+			const outcome = await resolve(leg.symbol, clientOrderId, signal);
+			return outcome?.status === NOT_PLACED;
+		} catch {
+			return false;
+		}
 	}
 
 	/** Base-asset quantity implied by holding `available` of the leg's input asset. */
@@ -367,23 +397,26 @@ export class CycleExecutor {
 
 			let filled = false;
 			for (let attempt = 0; attempt < Math.max(1, this.options.unwind.maxAttempts); attempt++) {
+				const clientOrderId = newClientOrderId("arbu");
 				let result: LegAttempt | undefined;
 				try {
-					result = await this.runUnwindLeg(leg, amount, signal);
+					result = await this.runUnwindLeg(leg, amount, clientOrderId, signal);
 				} catch (error) {
 					// An unwind that throws must not escape: the caller needs the cycle result so it
 					// can see, and act on, the inventory that is now stranded.
 					const ambiguous = error instanceof BinanceApiError && error.ambiguous;
+					// A timeout or 5xx may still have executed. Re-sending would flatten the same
+					// inventory twice and leave the account short, which is worse than the position
+					// we are trying to escape - unless the exchange confirms nothing was placed.
+					const retryable = !ambiguous || (await this.provenNotPlaced(leg, clientOrderId, signal));
 					this.logger.error("unwind attempt threw", {
 						symbol: leg.symbol,
 						attempt: attempt + 1,
 						ambiguous,
+						retryable,
 						error: error instanceof Error ? error.message : String(error),
 					});
-					// A timeout or 5xx may still have executed. Re-sending would flatten the same
-					// inventory twice and leave the account short, which is worse than the position
-					// we are trying to escape. Stop and let it be reported as stranded instead.
-					if (ambiguous) return { asset, amount, ambiguous: true };
+					if (!retryable) return { asset, amount, ambiguous: true };
 					continue;
 				}
 				if (!result) continue;
@@ -410,7 +443,12 @@ export class CycleExecutor {
 		return { asset, amount };
 	}
 
-	private async runUnwindLeg(leg: CycleLeg, available: Dec, signal?: AbortSignal): Promise<LegAttempt | undefined> {
+	private async runUnwindLeg(
+		leg: CycleLeg,
+		available: Dec,
+		clientOrderId: string,
+		signal?: AbortSignal,
+	): Promise<LegAttempt | undefined> {
 		const rules = this.options.rules.get(leg.symbol);
 		const book = this.options.store.get(leg.symbol);
 		if (!rules || !book) return undefined;
@@ -426,7 +464,7 @@ export class CycleExecutor {
 
 		this.options.onOrderSent?.();
 		const outcome = await this.options.engine.placeIoc(
-			{ symbol: leg.symbol, side: leg.side, price, quantity, rules, clientOrderId: newClientOrderId("arbu") },
+			{ symbol: leg.symbol, side: leg.side, price, quantity, rules, clientOrderId },
 			signal,
 		);
 		const settled = settleLeg(leg, outcome);

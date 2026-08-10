@@ -14,3 +14,4 @@ All notable changes to this package are documented in this file.
 - Added a weight-aware rate limiter that adopts the exchange's published limits at startup and honours `X-MBX-USED-WEIGHT` and `Retry-After`.
 - Added a JSONL trade ledger, metrics with latency percentiles, a live terminal dashboard, and tick recording with offline replay.
 - Added the `run`, `scan`, `symbols`, `doctor`, `replay` and `config` CLI commands.
+- Added recovery from an ambiguous order failure: the order is looked up by client id, and only an unanswerable lookup halts for manual reconciliation.

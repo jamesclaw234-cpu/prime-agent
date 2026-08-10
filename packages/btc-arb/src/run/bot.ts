@@ -538,6 +538,15 @@ export class ArbBot {
 			return;
 		}
 
+		if (result.needsReconciliation) {
+			// The executor converts every order error into a returned result rather than rethrowing,
+			// so this structured flag - not the catch above - is what actually reaches the
+			// supervisor. An order that may or may not have executed makes the recorded position
+			// untrustworthy, and continuing to trade against a guess is how a bad hour becomes a
+			// bad day.
+			this.risk.halt("an order failed ambiguously: manual reconciliation required");
+		}
+
 		const pnlAccounting = this.valuation?.convert(result.realizedPnl, result.realizedPnlAsset) ?? result.realizedPnl;
 		this.risk.onCycleResult(result, pnlAccounting);
 		this.ledger.record(result, pnlAccounting, opportunity.notionalInAccountingAsset);

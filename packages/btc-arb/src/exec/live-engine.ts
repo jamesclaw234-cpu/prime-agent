@@ -4,7 +4,7 @@ import { BINANCE_ERROR, type RawOrderResponse } from "../binance/types.js";
 import type { Asset } from "../types.js";
 import { type Dec, decFromString, ZERO } from "../util/decimal.js";
 import { type Logger, silentLogger } from "../util/logger.js";
-import type { ExecutionEngine, OrderOutcome, OrderRequest, SimpleFill } from "./engine.js";
+import { type ExecutionEngine, NOT_PLACED, type OrderOutcome, type OrderRequest, type SimpleFill } from "./engine.js";
 
 export interface LiveEngineOptions {
 	readonly client: BinanceRestClient;
@@ -86,12 +86,11 @@ export class LiveEngine implements ExecutionEngine {
 	 *
 	 * Looks the order up by the client id we generated. A `NO_SUCH_ORDER` response proves the
 	 * order never reached the book, which is the only safe basis for continuing.
+	 *
+	 * The returned outcome carries no `fills` array - Binance's order-query response has none - so
+	 * it answers "did this execute" and must not be used to compute commission or PnL.
 	 */
-	async resolveAmbiguous(
-		symbol: string,
-		clientOrderId: string,
-		signal?: AbortSignal,
-	): Promise<OrderOutcome | undefined> {
+	async resolveOrder(symbol: string, clientOrderId: string, signal?: AbortSignal): Promise<OrderOutcome | undefined> {
 		try {
 			const response = await this.options.client.queryOrder(symbol, { origClientOrderId: clientOrderId }, signal);
 			return toOutcome(response, 0);
@@ -100,7 +99,7 @@ export class LiveEngine implements ExecutionEngine {
 				return {
 					orderId: "",
 					clientOrderId,
-					status: "NOT_PLACED",
+					status: NOT_PLACED,
 					executedQty: ZERO,
 					quoteQty: ZERO,
 					fills: [],

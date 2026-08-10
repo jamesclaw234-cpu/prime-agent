@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { BinanceApiError } from "../src/binance/rest-client.js";
 import { BINANCE_ERROR } from "../src/binance/types.js";
 import { planOpportunity } from "../src/core/sizing.js";
-import type { ExecutionEngine, OrderOutcome, OrderRequest } from "../src/exec/engine.js";
+import { type ExecutionEngine, NOT_PLACED, type OrderOutcome, type OrderRequest } from "../src/exec/engine.js";
 import { CycleExecutor, reverseLeg } from "../src/exec/executor.js";
 import { PaperEngine } from "../src/exec/paper-engine.js";
 import type { Asset, Opportunity } from "../src/types.js";
@@ -42,9 +42,28 @@ function buildOpportunity(store = makeStore(PROFITABLE, NOW)): Opportunity {
 class ScriptedEngine implements ExecutionEngine {
 	readonly mode = "paper" as const;
 	readonly requests: OrderRequest[] = [];
+	readonly resolved: { symbol: string; clientOrderId: string }[] = [];
 	private index = 0;
 
-	constructor(private readonly script: ((request: OrderRequest) => OrderOutcome | Error)[]) {}
+	constructor(
+		private readonly script: ((request: OrderRequest) => OrderOutcome | Error)[],
+		/** What a resolveOrder lookup reports: absent, found, or unanswerable. */
+		private readonly resolution?: "not_placed" | "filled" | "unknown",
+	) {}
+
+	async resolveOrder(symbol: string, clientOrderId: string): Promise<OrderOutcome | undefined> {
+		this.resolved.push({ symbol, clientOrderId });
+		if (this.resolution === "unknown" || this.resolution === undefined) return undefined;
+		return {
+			orderId: this.resolution === "filled" ? "found" : "",
+			clientOrderId,
+			status: this.resolution === "filled" ? "FILLED" : NOT_PLACED,
+			executedQty: ZERO,
+			quoteQty: ZERO,
+			fills: [],
+			latencyMs: 1,
+		};
+	}
 
 	async placeIoc(request: OrderRequest): Promise<OrderOutcome> {
 		this.requests.push(request);
@@ -446,5 +465,49 @@ describe("ambiguous order failures", () => {
 		const engine = new ScriptedEngine([fullFill, fullFill, fullFill]);
 		const result = await makeExecutor(engine).execute(buildOpportunity());
 		expect(result.needsReconciliation).toBe(false);
+	});
+});
+
+describe("resolving an ambiguous failure", () => {
+	const timeout = () =>
+		new BinanceApiError(BINANCE_ERROR.TIMEOUT, "Timeout waiting for response", 504, "/api/v3/order");
+
+	it("treats a provably unplaced order as an ordinary missed leg", async () => {
+		// The common case: the request never reached the matching engine. Querying proves it, so
+		// the cycle can unwind normally instead of freezing for a human.
+		const engine = new ScriptedEngine([fullFill, timeout, fullFill], "not_placed");
+		const result = await makeExecutor(engine).execute(buildOpportunity());
+
+		expect(engine.resolved).toHaveLength(1);
+		expect(result.needsReconciliation).toBe(false);
+		expect(result.unwindFills.length).toBeGreaterThan(0);
+		expect(result.strandedAsset).toBeUndefined();
+	});
+
+	it("freezes when the order is found on the exchange", async () => {
+		const engine = new ScriptedEngine([fullFill, timeout, fullFill], "filled");
+		const result = await makeExecutor(engine).execute(buildOpportunity());
+
+		expect(engine.resolved).toHaveLength(1);
+		expect(result.needsReconciliation).toBe(true);
+		expect(result.unwindFills).toHaveLength(0);
+	});
+
+	it("freezes when the lookup itself cannot answer", async () => {
+		const engine = new ScriptedEngine([fullFill, timeout, fullFill], "unknown");
+		const result = await makeExecutor(engine).execute(buildOpportunity());
+
+		expect(result.needsReconciliation).toBe(true);
+		expect(result.unwindFills).toHaveLength(0);
+	});
+
+	it("looks the order up by the id it was sent with", async () => {
+		const engine = new ScriptedEngine([fullFill, timeout], "not_placed");
+		await makeExecutor(engine).execute(buildOpportunity());
+		// The id queried is the one generated for the failed leg, which is the whole point of
+		// generating it before dispatch rather than inside the request.
+		expect(engine.resolved[0].symbol).toBe("ETHBTC");
+		expect(engine.resolved[0].clientOrderId).toMatch(/^arb-/);
+		expect(engine.requests.map((r) => r.clientOrderId)).toContain(engine.resolved[0].clientOrderId);
 	});
 });

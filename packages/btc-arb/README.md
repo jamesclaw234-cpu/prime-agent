@@ -190,7 +190,7 @@ promised. It is the direct measure of how much of your detected edge survives ex
 npx vitest --run
 ```
 
-240 tests, all offline and deterministic — no network, no API keys, no paid calls. Coverage
+258 tests, all offline and deterministic — no network, no API keys, no paid calls. Coverage
 includes the exact-decimal money math, filter parsing and rounding, fee arithmetic (float screen
 checked against exact arithmetic), depth and lot-rounding rejections, cycle enumeration,
 Bellman-Ford sweeps, WebSocket reconnect and staleness state machines, HMAC signing against
