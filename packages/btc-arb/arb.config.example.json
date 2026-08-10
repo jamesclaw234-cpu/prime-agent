@@ -1,0 +1,85 @@
+{
+	"mode": "paper",
+
+	"binance": {
+		"restBaseUrl": "https://api.binance.com",
+		"wsBaseUrl": "wss://stream.binance.com:9443",
+		"recvWindowMs": 5000,
+		"testnet": false,
+		"streamsPerConnection": 64,
+		"requestTimeoutMs": 5000
+	},
+
+	"universe": {
+		"quoteAssets": ["USDT", "USDC", "FDUSD", "BTC", "ETH", "BNB"],
+		"baseAssets": [],
+		"excludeAssets": [],
+		"excludeSymbols": [],
+		"maxSymbols": 200,
+		"requireAsset": "BTC"
+	},
+
+	"fees": {
+		"takerBps": 10,
+		"autoDetect": true
+	},
+
+	"detection": {
+		"maxCycleLength": 3,
+		"minNetEdgeBps": 8,
+		"maxBookAgeMs": 1500,
+		"screenMarginBps": 2,
+		"bellmanFordIntervalMs": 1000,
+		"logEdgeBps": 5
+	},
+
+	"execution": {
+		"enabled": true,
+		"startAssets": ["USDT"],
+		"maxNotionalPerCycle": 200,
+		"minNotionalPerCycle": 20,
+		"depthUtilization": 0.5,
+		"aggressionTicks": 2,
+		"requireNonNegativeWorstCase": true,
+		"cycleDeadlineMs": 3000,
+		"maxConcurrentCycles": 1,
+		"unwind": {
+			"enabled": true,
+			"maxAttempts": 3,
+			"aggressionTicks": 10
+		}
+	},
+
+	"risk": {
+		"accountingAsset": "USDT",
+		"maxDailyLoss": 50,
+		"maxConsecutiveFailures": 5,
+		"errorWindowMs": 60000,
+		"maxErrorsInWindow": 20,
+		"symbolCooldownMs": 5000,
+		"maxOrdersPerSecond": 8,
+		"maxClockSkewMs": 1000,
+		"minTimeBetweenCyclesMs": 250,
+		"killSwitchPollMs": 1000,
+		"haltOnStranded": true,
+		"maxCyclesPerDay": 0
+	},
+
+	"paper": {
+		"startingBalances": {
+			"USDT": 10000
+		},
+		"latencyMs": 120,
+		"fillProbability": 0.7,
+		"adverseSelectionBps": 1,
+		"depthConsumptionRatio": 0.6,
+		"seed": 0
+	},
+
+	"observability": {
+		"logLevel": "info",
+		"metricsIntervalMs": 30000,
+		"dashboard": true,
+		"recordFile": ""
+	}
+}
