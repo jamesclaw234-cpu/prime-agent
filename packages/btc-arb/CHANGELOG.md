@@ -30,3 +30,4 @@ All notable changes to this package are documented in this file.
 - Documented that lot-step dust, not the fee, is the dominant cost of a small cycle. Each intermediate asset's remainder is bounded by one `stepSize` of the *next* symbol, so a fixed amount is left behind per cycle: measured at ~42bps on a $100 cycle and ~0.4bps on a $10,000 one.
 - Changed a rate-limit wait that exhausts a request's budget to name the window that ran out and its usage, rather than reporting only that the request was rate limited.
 - Changed `test/mock-exchange.ts` to report a port collision clearly, since a leftover server from an earlier run otherwise keeps answering while the new one dies in the background.
+- Added a dust estimate to `symbols`: per cycle, the value left behind by lot rounding and the notional at which it equals the configured edge threshold. It needs no credentials and no funds, so a venue's viability can be checked before an account is funded.

@@ -19,10 +19,12 @@ import { CycleIndex, enumerateCycles } from "./core/cycles.js";
 import { Detector } from "./core/detector.js";
 import { MarketGraph, pruneDeadEnds, selectUniverse } from "./core/graph.js";
 import { makeFeeModel } from "./core/pricing.js";
+import { Valuation } from "./core/valuation.js";
 import { Dashboard } from "./obs/dashboard.js";
 import { parseRecordedTick } from "./obs/recorder.js";
 import { ArbBot } from "./run/bot.js";
-import { type Dec, decFromNumber, decFromString, decIsPositive, decToNumber } from "./util/decimal.js";
+import type { Cycle, MarketSymbol, SymbolRules } from "./types.js";
+import { type Dec, decFromNumber, decFromString, decIsPositive, decMul, decToNumber } from "./util/decimal.js";
 import { Logger } from "./util/logger.js";
 
 const USAGE = `pi-arb - Binance Spot triangular arbitrage scanner and execution engine
@@ -277,11 +279,72 @@ async function commandSymbols(args: ParsedArgs): Promise<number> {
 	out.write(`cycles             ${cycles.length}\n`);
 	out.write(`subscribed markets ${index.usedSymbols().length}\n`);
 	out.write(`max fanout         ${index.maxFanout()} cycles re-priced per tick, worst case\n\n`);
+	// Price the lot grid. Dust is a fixed cost per cycle, so the notional it needs to disappear
+	// under is the single most useful number here - and it is knowable before funding anything.
+	const store = new BookStore();
+	try {
+		const at = Date.now();
+		for (const ticker of await client.bookTickers()) {
+			if (!all.has(ticker.symbol)) continue;
+			const bid = decFromString(ticker.bidPrice);
+			const ask = decFromString(ticker.askPrice);
+			if (!decIsPositive(bid) || !decIsPositive(ask) || bid >= ask) continue;
+			store.apply(
+				makeBook(ticker.symbol, bid, decFromString(ticker.bidQty), ask, decFromString(ticker.askQty), 0, at),
+			);
+		}
+	} catch {
+		// Prices are a nicety here; the cycle table is still worth printing without them.
+	}
+	const valuation = new Valuation(store, graph, config.risk.accountingAsset);
+	const unit = config.risk.accountingAsset;
+	const edge = config.detection.minNetEdgeBps;
+
+	out.write(`  ${"cycle".padEnd(32)} ${"legs".padEnd(44)} ${"dust".padStart(9)}  ${"needs".padStart(10)}\n`);
 	for (const cycle of cycles.slice(0, 40)) {
-		out.write(`  ${cycle.id.padEnd(32)} ${cycle.legs.map((l) => `${l.side} ${l.symbol}`).join(" -> ")}\n`);
+		const legs = cycle.legs.map((l) => `${l.side} ${l.symbol}`).join(" -> ");
+		const dust = expectedDust(cycle, all, store, valuation);
+		const needs = dust === undefined || edge <= 0 ? undefined : (dust * 10_000) / edge;
+		out.write(
+			`  ${cycle.id.padEnd(32)} ${legs.padEnd(44)} ${(dust === undefined ? "-" : dust.toFixed(4)).padStart(9)}  ${(needs === undefined ? "-" : Math.ceil(needs).toLocaleString()).padStart(10)}\n`,
+		);
 	}
 	if (cycles.length > 40) out.write(`  ... and ${cycles.length - 40} more\n`);
+	out.write(
+		`\n  dust  = ${unit} left behind per cycle, on average, because each leg's output rounds down to the\n` +
+			`          next symbol's lot step. It stays in the account but cannot be sold: it is below minQty.\n` +
+			`  needs = notional per cycle at which that dust equals your ${edge}bps edge threshold. Below it,\n` +
+			`          the lot grid costs more than the cycle is being asked to earn.\n`,
+	);
 	return 0;
+}
+
+/**
+ * Average value left stranded in the intermediate assets of one cycle.
+ *
+ * Each leg's output is spent by the next leg, whose quantity rounds down to its own `stepSize`, so
+ * the remainder is bounded by one step of the *consuming* symbol - measured in the asset being
+ * spent, which is why a BUY leg's bound is scaled by its price. Half a step is the expected value.
+ */
+export function expectedDust(
+	cycle: Cycle,
+	rules: ReadonlyMap<MarketSymbol, SymbolRules>,
+	store: BookStore,
+	valuation: Valuation,
+): number | undefined {
+	let total = 0;
+	for (let index = 0; index + 1 < cycle.legs.length; index++) {
+		const next = cycle.legs[index + 1];
+		const rule = rules.get(next.symbol);
+		const book = store.get(next.symbol);
+		if (!rule || !book) return undefined;
+		// A BUY spends the quote asset, so a step of base quantity is a step-times-price of it.
+		const perStep = next.side === "BUY" ? decMul(rule.stepSize, book.ask) : rule.stepSize;
+		const value = valuation.convert(perStep, cycle.legs[index].toAsset);
+		if (value === undefined) return undefined;
+		total += decToNumber(value) / 2;
+	}
+	return total;
 }
 
 /** Read-only preflight. Places no orders and needs no credentials for the public checks. */

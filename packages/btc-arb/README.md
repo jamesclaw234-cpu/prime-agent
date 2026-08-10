@@ -59,7 +59,7 @@ npx tsx src/cli.ts doctor
 | --------- | ----------------------------------------------------------------------------- |
 | `run`     | Detect and execute. Paper unless the live gate opens.                          |
 | `scan`    | Detect and log only. Never executes, even with credentials present.            |
-| `symbols` | Resolve the universe and print the cycle table and per-tick fanout.            |
+| `symbols` | Resolve the universe; print the cycle table, per-tick fanout and dust per cycle. |
 | `doctor`  | Read-only preflight checks. Reports whether the live gate would open.          |
 | `replay`  | Feed a recorded tick file back through the detector.                           |
 | `config`  | Print the effective configuration with secrets redacted.                       |
@@ -213,7 +213,7 @@ promised. It is the direct measure of how much of your detected edge survives ex
 npx vitest --run
 ```
 
-297 tests, all offline and deterministic — no network, no API keys, no paid calls. Coverage
+299 tests, all offline and deterministic — no network, no API keys, no paid calls. Coverage
 includes the exact-decimal money math, filter parsing and rounding, fee arithmetic (float screen
 checked against exact arithmetic), depth and lot-rounding rejections, cycle enumeration,
 Bellman-Ford sweeps, WebSocket reconnect and staleness state machines, HMAC signing against
@@ -325,8 +325,10 @@ npx tsx src/cli.ts scan --config binance-us.config.json    # read-only, no key n
 
 Two differences that matter, both verified from that spec:
 
-- **There is no testnet.** Your first live order is on the real exchange with real money. The
-  rehearsal step available on Binance.com global simply does not exist here.
+- **There is no testnet.** Your first live order would otherwise be on the real exchange with real
+  money. Use the [mock exchange](#rehearsing-the-live-path-without-an-exchange) as the rehearsal
+  step instead — it is the same code path, including live order placement, against a server that
+  checks your signatures.
 - **`GET /api/v3/account/commission` is absent**, so the three-component fee breakdown cannot be
   read. The bot falls back to the account's `commissionRates` automatically, which is the standard
   component only. Pin `fees.takerBps` from your actual fee schedule rather than trusting the
@@ -334,7 +336,20 @@ Two differences that matter, both verified from that spec:
 
 And the economic caveat, which matters more than either: Binance.US lists far fewer pairs with much
 thinner books. Triangular arbitrage needs dense cross-pairs to have cycles at all, and the ~30bps
-fee hurdle is unchanged. Run `scan` before assuming there is anything there.
+fee hurdle is unchanged.
+
+Check both before assuming there is anything there — neither command needs a key or any funds:
+
+```bash
+npx tsx src/cli.ts symbols --config binance-us.config.json   # what cycles exist, and what they cost
+npx tsx src/cli.ts scan    --config binance-us.config.json   # whether any of them ever clear
+```
+
+`symbols` prints a `needs` column per cycle: the notional at which that cycle's lot-grid dust
+equals your edge threshold. Thin books cap how much you can put through a cycle, and dust sets a
+floor on how little is worth putting through it. If those two numbers cross the wrong way for
+every cycle on the venue, no amount of tuning fixes it, and that is worth knowing before funding
+an account rather than after.
 
 ## Exchange rules not enforced client-side
 

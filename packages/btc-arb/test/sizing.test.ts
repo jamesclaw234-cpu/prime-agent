@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { expectedDust } from "../src/cli.js";
 import { planOpportunity } from "../src/core/sizing.js";
 import { Valuation } from "../src/core/valuation.js";
 import type { SymbolRules } from "../src/types.js";
@@ -15,6 +16,7 @@ import {
 	GRAPH,
 	makeStore,
 	PROFITABLE,
+	RULES,
 	TRIANGLE,
 } from "./fixtures.js";
 
@@ -247,5 +249,27 @@ describe("accounting", () => {
 		if (!result.ok) throw new Error("expected a plan");
 		// The start asset is the accounting asset, so the notional passes through unchanged.
 		expect(decToString(result.opportunity.notionalInAccountingAsset)).toBe(decToString(result.opportunity.amountIn));
+	});
+});
+
+describe("expected lot-grid dust", () => {
+	/**
+	 * The number `symbols` prints, and the one that decides whether a notional is viable at all.
+	 *
+	 * Hand-checkable against the fixtures: leg 2 buys ETHBTC in 0.0001 ETH steps at 0.1 BTC, so up
+	 * to 0.00001 BTC of leg 1's output cannot be spent - 0.00099 USDT at the 99 bid. Leg 3 sells
+	 * ETHUSDT in 0.0001 ETH steps, so up to 0.0001 ETH is left - 0.0012 USDT at the 12 bid. Half of
+	 * each is the expected value.
+	 */
+	it("sums half a step of the consuming symbol for each intermediate asset", () => {
+		const store = makeStore(PROFITABLE, 1_000_000);
+		const valuation = new Valuation(store, GRAPH, "USDT");
+		const dust = expectedDust(TRIANGLE, RULES, store, valuation);
+		expect(dust).toBeCloseTo((0.00099 + 0.0012) / 2, 9);
+	});
+
+	it("returns undefined rather than a guess when a book is missing", () => {
+		const store = makeStore({ BTCUSDT: PROFITABLE.BTCUSDT }, 1_000_000);
+		expect(expectedDust(TRIANGLE, RULES, store, new Valuation(store, GRAPH, "USDT"))).toBeUndefined();
 	});
 });
