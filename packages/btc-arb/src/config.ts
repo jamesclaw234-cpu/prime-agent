@@ -257,6 +257,14 @@ export const DEFAULT_CONFIG: ArbConfig = {
 
 type Json = Record<string, unknown>;
 
+/**
+ * Config paths whose keys are chosen by the operator rather than fixed by the schema.
+ *
+ * Everything else is validated against the defaults so a typo is caught rather than silently
+ * ignored; these are the exceptions where any key is legitimate.
+ */
+const OPEN_RECORD_PATHS = new Set(["paper.startingBalances"]);
+
 function isObject(value: unknown): value is Json {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -265,6 +273,10 @@ function isObject(value: unknown): value is Json {
 function mergeInto(base: unknown, override: unknown, path: string): unknown {
 	if (override === undefined) return base;
 	if (isObject(base) && isObject(override)) {
+		// An open record is keyed by user-chosen names - asset tickers, not schema fields - so its
+		// keys cannot be checked against the defaults. Rejecting them turned "start from USD instead
+		// of USDT" into a baffling `unknown config key: paper.startingBalances.USD`.
+		if (OPEN_RECORD_PATHS.has(path)) return { ...base, ...override };
 		const merged: Json = { ...base };
 		for (const [key, value] of Object.entries(override)) {
 			if (!(key in base)) throw new ConfigError(`unknown config key: ${path ? `${path}.${key}` : key}`);

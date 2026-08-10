@@ -209,7 +209,7 @@ promised. It is the direct measure of how much of your detected edge survives ex
 npx vitest --run
 ```
 
-276 tests, all offline and deterministic — no network, no API keys, no paid calls. Coverage
+280 tests, all offline and deterministic — no network, no API keys, no paid calls. Coverage
 includes the exact-decimal money math, filter parsing and rounding, fee arithmetic (float screen
 checked against exact arithmetic), depth and lot-rounding rejections, cycle enumeration,
 Bellman-Ford sweeps, WebSocket reconnect and staleness state machines, HMAC signing against
@@ -232,6 +232,34 @@ vary per symbol and only one symbol is sampled — pin `fees.takerBps` explicitl
 The BNB discount is deliberately not modelled: it applies only to the standard component, and the
 published examples disagree on whether the `discount` field is the multiplier or the reduction.
 Ignoring it overstates the fee, which is the safe direction.
+
+## Binance.US
+
+Binance.com global geo-blocks some jurisdictions with `HTTP 451`, including its testnet. If
+`doctor` reports "Service unavailable from a restricted location", that is a jurisdictional block
+on your address, not a fault in the bot, and no configuration works around it.
+
+Binance.US is a separate exchange that serves those users, and its API is compatible with what this
+bot needs — verified against `binance-us/binance-us-api-docs`: identical `/api/v3/*` paths, the same
+`X-MBX-APIKEY` header and HMAC signing, the same filter model including `PERCENT_PRICE_BY_SIDE` and
+`NOTIONAL`, and the same `bookTicker` stream. `binance-us.config.json` is a ready profile.
+
+```bash
+npx tsx src/cli.ts scan --config binance-us.config.json    # read-only, no key needed
+```
+
+Two differences that matter, both verified from that spec:
+
+- **There is no testnet.** Your first live order is on the real exchange with real money. The
+  rehearsal step available on Binance.com global simply does not exist here.
+- **`GET /api/v3/account/commission` is absent**, so the three-component fee breakdown cannot be
+  read. The bot falls back to the account's `commissionRates` automatically, which is the standard
+  component only. Pin `fees.takerBps` from your actual fee schedule rather than trusting the
+  fallback.
+
+And the economic caveat, which matters more than either: Binance.US lists far fewer pairs with much
+thinner books. Triangular arbitrage needs dense cross-pairs to have cycles at all, and the ~30bps
+fee hurdle is unchanged. Run `scan` before assuming there is anything there.
 
 ## Exchange rules not enforced client-side
 

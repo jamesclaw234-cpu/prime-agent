@@ -21,4 +21,6 @@ All notable changes to this package are documented in this file.
 - Changed order placement to use its own timeout above the exchange's 10-second processing timeout, so a slow order reports its outcome instead of becoming an unknown.
 - Fixed `-1006` not being treated as an ambiguous outcome despite the spec stating its execution status is unknown.
 - Changed the unfilled-order budget to follow the exchange's own count in both directions, since a filled order decrements it and the previous floor-only behaviour throttled the bot exactly when its orders were trading.
+- Added a `binance-us.config.json` profile for users geo-blocked from Binance.com global, with the API compatibility and the missing-testnet caveat documented.
+- Fixed `paper.startingBalances` rejecting any asset not present in the defaults, which turned starting from a non-USDT balance into an "unknown config key" error.
 - Fixed the taker fee understating the real cost: Binance charges standard, tax and special commission components, and adds the side rate to the taker rate within each. The bot now sums all three from `GET /api/v3/account/commission` and warns when non-standard components apply.

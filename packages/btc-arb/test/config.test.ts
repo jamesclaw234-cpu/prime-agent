@@ -220,3 +220,34 @@ describe("argument parsing", () => {
 		expect(parseArgs(["-h"]).help).toBe(true);
 	});
 });
+
+describe("shipped config profiles", () => {
+	// The profiles are documentation people copy verbatim. A profile that no longer validates is a
+	// broken instruction, so they are loaded here rather than trusted to stay correct.
+	const profiles = ["arb.config.example.json", "binance-us.config.json"];
+
+	for (const profile of profiles) {
+		it(`${profile} loads and validates`, () => {
+			const file = join(import.meta.dirname, "..", profile);
+			expect(() => loadConfig({ file, env: {} })).not.toThrow();
+		});
+	}
+
+	it("the Binance.US profile points both hosts at Binance.US", () => {
+		const config = loadConfig({ file: join(import.meta.dirname, "..", "binance-us.config.json"), env: {} });
+		expect(config.binance.restBaseUrl).toBe("https://api.binance.us");
+		expect(config.binance.wsBaseUrl).toBe("wss://stream.binance.us:9443");
+		expect(config.mode).toBe("paper");
+	});
+
+	it("refuses --testnet against Binance.US, which has no testnet", () => {
+		// Binance.US publishes no testnet. The environment guard catches the mistake rather than
+		// letting a run straddle a testnet host and a live one.
+		expect(() =>
+			loadConfig({
+				file: join(import.meta.dirname, "..", "binance-us.config.json"),
+				env: { ARB_TESTNET: "1" },
+			}),
+		).toThrow(/testnet is enabled but/);
+	});
+});
