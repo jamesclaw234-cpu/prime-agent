@@ -2,7 +2,7 @@
 import { createReadStream, realpathSync } from "node:fs";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
-import { parseExchangeInfo } from "./binance/filters.js";
+import { formatPrice, formatQty, maxCompliantQty, parseExchangeInfo, roundPriceDown } from "./binance/filters.js";
 import { DEFAULT_LIMITS, RateLimiter } from "./binance/rate-limiter.js";
 import { BinanceRestClient } from "./binance/rest-client.js";
 import {
@@ -24,7 +24,16 @@ import { Dashboard } from "./obs/dashboard.js";
 import { parseRecordedTick } from "./obs/recorder.js";
 import { ArbBot } from "./run/bot.js";
 import type { Cycle, MarketSymbol, SymbolRules } from "./types.js";
-import { type Dec, decFromNumber, decFromString, decIsPositive, decMul, decToNumber } from "./util/decimal.js";
+import {
+	type Dec,
+	decCeilToStep,
+	decDivCeil,
+	decFromNumber,
+	decFromString,
+	decIsPositive,
+	decMul,
+	decToNumber,
+} from "./util/decimal.js";
 import { Logger } from "./util/logger.js";
 
 const USAGE = `pi-arb - Binance Spot triangular arbitrage scanner and execution engine
@@ -394,8 +403,55 @@ async function commandDoctor(args: ParsedArgs): Promise<number> {
 			const withdrawal = account.canWithdraw ? "ENABLED (reduce this key's permissions)" : "disabled";
 			return `canTrade=${account.canTrade}, taker=${taker}, withdrawals ${withdrawal}`;
 		});
+		// The signed *order* path is the one that has never run until the first real order, and it
+		// is the one that costs money to get wrong. `POST /api/v3/order/test` runs a real order
+		// through every filter and the full signature check and places nothing, so it can be proven
+		// for free - which matters most on a venue with no testnet.
+		await check("order validation (places nothing)", async () => {
+			const info = await client.exchangeInfo();
+			const rules = parseExchangeInfo(info);
+			const { selected } = selectUniverse(rules.values(), {
+				quoteAssets: config.universe.quoteAssets,
+				baseAssets: config.universe.baseAssets,
+				excludeAssets: config.universe.excludeAssets,
+				excludeSymbols: config.universe.excludeSymbols,
+				maxSymbols: config.universe.maxSymbols,
+			});
+			const target = selected.find((rule) => config.execution.startAssets.includes(rule.quoteAsset));
+			if (!target) throw new Error("no market in the universe is quoted in a configured start asset");
+
+			const book = (await client.bookTickers()).find((ticker) => ticker.symbol === target.symbol);
+			if (!book) throw new Error(`no book for ${target.symbol}`);
+
+			// Deliberately far below the touch: a BUY that cannot cross is still validated against
+			// every filter, and cannot fill even if something later placed it by mistake.
+			const price = roundPriceDown(target, decMul(decFromString(book.bidPrice), decFromString("0.7")));
+			// `minNotionalPerCycle` is money, not quantity: a real leg-1 order is the smallest the
+			// bot would ever send, which is the interesting case for a minimum-notional filter.
+			const notional = decFromNumber(config.execution.minNotionalPerCycle);
+			// Round the lot *up*, so the probe is genuinely at or above the configured minimum rather
+			// than a step below it - a NOTIONAL filter is exactly what this is meant to exercise.
+			const wanted = decCeilToStep(decDivCeil(notional, price), target.stepSize);
+			const quantity = maxCompliantQty(target, price, wanted);
+			if (!decIsPositive(quantity)) {
+				throw new Error(
+					`execution.minNotionalPerCycle (${config.execution.minNotionalPerCycle}) is below ${target.symbol}'s own minimum of ${decToNumber(target.minNotional)}`,
+				);
+			}
+
+			await client.testOrder({
+				symbol: target.symbol,
+				side: "BUY",
+				type: "LIMIT",
+				timeInForce: "IOC",
+				quantity: formatQty(target, quantity),
+				price: formatPrice(target, price),
+			});
+			return `${target.symbol} BUY ${formatQty(target, quantity)} @ ${formatPrice(target, price)} accepted by the exchange`;
+		});
 	} else {
 		out.write(`  skip  ${"credentials".padEnd(28)} BINANCE_API_KEY / BINANCE_API_SECRET not set\n`);
+		out.write(`  skip  ${"order validation".padEnd(28)} needs credentials; places nothing when it runs\n`);
 	}
 
 	const gate = evaluateLiveGate(config, process.env, args.live);

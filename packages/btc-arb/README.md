@@ -60,7 +60,7 @@ npx tsx src/cli.ts doctor
 | `run`     | Detect and execute. Paper unless the live gate opens.                          |
 | `scan`    | Detect and log only. Never executes, even with credentials present.            |
 | `symbols` | Resolve the universe; print the cycle table, per-tick fanout and dust per cycle. |
-| `doctor`  | Read-only preflight checks. Reports whether the live gate would open.          |
+| `doctor`  | Preflight checks. Validates a real order without placing it. Places no orders. |
 | `replay`  | Feed a recorded tick file back through the detector.                           |
 | `config`  | Print the effective configuration with secrets redacted.                       |
 
@@ -109,7 +109,13 @@ npx tsx src/cli.ts doctor   # confirms the key works and warns if it can withdra
 to your egress IP.** `doctor` warns if the key can withdraw. Credentials are read from the
 environment only — a config file containing `apiKey` or `apiSecret` is rejected outright.
 
-Start on the Spot testnet (`--testnet`) to verify the whole path end to end without capital.
+`doctor` also runs a real leg-1 order through `POST /api/v3/order/test` — the exchange checks the
+signature and every filter and places nothing. That proves the signed order path against the real
+venue for free, which is the part you otherwise only find out about with money on the line.
+
+Start on the Spot testnet (`--testnet`) to verify the whole path end to end without capital. On
+Binance.US there is no testnet, so use the [mock exchange](#rehearsing-the-live-path-without-an-exchange)
+for that step instead.
 
 ### Stopping it
 
