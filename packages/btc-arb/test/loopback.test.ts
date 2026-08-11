@@ -375,3 +375,24 @@ describe("credential errors over the wire", () => {
 		}
 	});
 });
+
+describe("venue parameter strictness", () => {
+	/**
+	 * Regression: `GET /api/v3/account` carried `omitZeroBalances`.
+	 *
+	 * Binance.com ignores it; Binance.US answers `-1101 Too many parameters`. That endpoint is the
+	 * only source of balances, so on Binance.US every balance refresh failed, every cycle had no
+	 * budget, and the bot ran indefinitely without ever placing an order or reporting a fault. The
+	 * fake refuses extra parameters here for exactly that reason.
+	 */
+	it("reads balances from a venue that refuses optional parameters", async () => {
+		const { bot, fake } = await boot({ live: true });
+		expect(fake.paths).toContain("/api/v3/account");
+
+		// A funded budget is the observable consequence: with the balance read failing, nothing is
+		// spendable and no cycle can ever be sized.
+		await waitFor("shards to open", () => fake.openConnections === 2);
+		await pump(fake, QUOTES, () => fake.placements.length >= 3, 10_000);
+		expect(bot.status().ledger.cycles).toBeGreaterThanOrEqual(1);
+	}, 30_000);
+});

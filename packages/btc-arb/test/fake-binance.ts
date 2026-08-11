@@ -310,7 +310,18 @@ export class FakeBinance {
 					break;
 				}
 				case "GET /api/v3/account": {
-					if (this.authorize(req, rawQuery, res)) this.ok(res, this.account());
+					if (!this.authorize(req, rawQuery, res)) break;
+					// Binance.US rejects anything beyond timestamp, recvWindow and signature here, and
+					// this endpoint is the only source of balances - so a parameter the other venue
+					// happily ignores stops the bot funding any cycle at all. Strict on purpose.
+					const extra = [...params.keys()].filter(
+						(key) => key !== "timestamp" && key !== "recvWindow" && key !== "signature",
+					);
+					if (extra.length > 0) {
+						this.fail(res, 400, -1101, `Too many parameters; expected '3' and received '${params.size}'.`);
+						break;
+					}
+					this.ok(res, this.account());
 					break;
 				}
 				case "GET /api/v3/account/commission": {

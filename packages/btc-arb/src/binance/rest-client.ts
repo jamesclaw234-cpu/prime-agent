@@ -343,12 +343,21 @@ export class BinanceRestClient {
 		);
 	}
 
+	/**
+	 * Account balances and commission rates.
+	 *
+	 * Sends no optional parameters. Binance.com accepts `omitZeroBalances`, which trims a payload
+	 * that otherwise lists every asset ever held - but Binance.US rejects the whole request with
+	 * `-1101 Too many parameters; expected '3' and received '4'`, and this endpoint is not
+	 * optional: it is the only source of balances, so failing it means the bot never funds a cycle
+	 * and silently never trades. A slightly larger response is a trivial price for working on both
+	 * venues, and zero balances are filtered by the caller anyway.
+	 */
 	async account(signal?: AbortSignal): Promise<RawAccountInfo> {
 		return this.request<RawAccountInfo>(
 			"GET",
 			"/api/v3/account",
-			// The payload lists every asset ever held otherwise; only fundable balances matter here.
-			{ omitZeroBalances: true },
+			{},
 			{ [WEIGHT]: ENDPOINT_WEIGHT.account },
 			{ signed: true, signal },
 		);
