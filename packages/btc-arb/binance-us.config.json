@@ -16,7 +16,7 @@
 		"baseAssets": [],
 		"excludeAssets": [],
 		"excludeSymbols": [],
-		"maxSymbols": 200,
+		"maxSymbols": 400,
 		"requireAsset": ""
 	},
 

@@ -376,6 +376,13 @@ npx tsx src/cli.ts symbols --config binance-us.config.json   # what cycles exist
 npx tsx src/cli.ts scan    --config binance-us.config.json   # whether any of them ever clear
 ```
 
+It also flags when `universe.maxSymbols` is binding. That cap has to drop *something*, and what it
+drops matters more than it looks: markets are ranked by the **less connected of their two assets**,
+because sitting on a cycle requires being able to leave whatever you arrive at, and an asset that
+appears in one market only is a dead end however liquid its counterpart is. Ranking by the sum
+instead — or alphabetically — scores every leaf pair quoted in USD as highly as the USD bridge
+itself, and on Binance.US that difference was 12 visible cycles against 60 real ones.
+
 `symbols` also reports how many cycles exist at `maxCycleLength` 4, which is off by default. On a
 venue with few crypto-crypto crosses that is often the difference between a handful of cycles and a
 usable table — at the cost of a fourth fee and a third dust remainder, both of which the same

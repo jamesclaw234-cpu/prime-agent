@@ -325,7 +325,7 @@ async function commandSymbols(args: ParsedArgs): Promise<number> {
 
 	const info = await client.exchangeInfo();
 	const all = parseExchangeInfo(info);
-	const { selected, rejected } = selectUniverse(all.values(), {
+	const { selected, rejected, capped } = selectUniverse(all.values(), {
 		quoteAssets: config.universe.quoteAssets,
 		baseAssets: config.universe.baseAssets,
 		excludeAssets: config.universe.excludeAssets,
@@ -356,7 +356,10 @@ async function commandSymbols(args: ParsedArgs): Promise<number> {
 
 	const out = process.stdout;
 	out.write(`exchange symbols   ${all.size}\n`);
-	out.write(`selected           ${selected.length} (rejected ${rejected.size})\n`);
+	out.write(
+		`selected           ${selected.length} (rejected ${rejected.size})` +
+			`${capped ? ` - CAPPED at universe.maxSymbols ${config.universe.maxSymbols}; raise it to see the rest` : ""}\n`,
+	);
 	out.write(`after dead-end prune ${pruned.length}\n`);
 	out.write(`assets             ${graph.assets.length}\n`);
 	out.write(`cycles             ${cycles.length} at maxCycleLength ${config.detection.maxCycleLength}\n`);

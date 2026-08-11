@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { findNegativeCycles } from "../src/core/bellman-ford.js";
 import { CycleIndex, enumerateCycles } from "../src/core/cycles.js";
 import { MarketGraph, pruneDeadEnds, selectUniverse } from "../src/core/graph.js";
+import type { SymbolRules } from "../src/types.js";
 import { BTCUSDT, ETHBTC, ETHUSDT, FEE_10BPS, FEE_ZERO, FLAT, makeRules, makeStore, PROFITABLE } from "./fixtures.js";
 
 const THREE = [BTCUSDT, ETHBTC, ETHUSDT];
@@ -159,5 +160,59 @@ describe("negative cycle sweep", () => {
 			minEdgeBps: 1,
 		});
 		expect(found).toHaveLength(0);
+	});
+});
+
+describe("universe cap", () => {
+	/**
+	 * Regression: the cap truncated alphabetically and deleted the bridge markets.
+	 *
+	 * On a USD/USDT venue the markets that make stablecoin cycles possible are `USDCUSD`,
+	 * `USDCUSDT` and `USDTUSD` — which sort to the very end of the alphabet. A binding cap removed
+	 * exactly those and left a table of leaf pairs, so a real Binance.US scan saw 12 cycles where
+	 * 60 existed. The cap has to drop something; it must not be the hubs.
+	 */
+	function venue(): SymbolRules[] {
+		const rules: SymbolRules[] = [
+			makeRules({ symbol: "USDTUSD", baseAsset: "USDT", quoteAsset: "USD" }),
+			makeRules({ symbol: "USDCUSD", baseAsset: "USDC", quoteAsset: "USD" }),
+			makeRules({ symbol: "USDCUSDT", baseAsset: "USDC", quoteAsset: "USDT" }),
+		];
+		// Leaf markets, alphabetically early, quoted only in USD. Each touches one asset once.
+		for (const base of ["AAA", "BBB", "CCC", "DDD", "EEE", "FFF", "GGG"]) {
+			rules.push(makeRules({ symbol: `${base}USD`, baseAsset: base, quoteAsset: "USD" }));
+		}
+		return rules;
+	}
+
+	it("keeps the bridge markets when the cap binds, not the alphabet", () => {
+		const { selected, rejected, capped } = selectUniverse(venue(), {
+			quoteAssets: ["USD", "USDT"],
+			maxSymbols: 5,
+		});
+		expect(capped).toBe(true);
+		expect(selected).toHaveLength(5);
+		const kept = new Set(selected.map((rule) => rule.symbol));
+		for (const bridge of ["USDTUSD", "USDCUSD", "USDCUSDT"]) {
+			expect(kept.has(bridge)).toBe(true);
+		}
+		// Something had to go, and it was a leaf rather than a hub.
+		expect(rejected.size).toBeGreaterThan(0);
+	});
+
+	it("still enumerates the stablecoin cycle that the cap used to delete", () => {
+		const { selected } = selectUniverse(venue(), { quoteAssets: ["USD", "USDT"], maxSymbols: 5 });
+		const cycles = enumerateCycles(new MarketGraph(pruneDeadEnds(selected)), {
+			startAssets: ["USDT"],
+			maxLength: 3,
+		});
+		expect(cycles.length).toBeGreaterThan(0);
+		expect(cycles.some((cycle) => cycle.id.includes("USDC"))).toBe(true);
+	});
+
+	it("reports whether the cap actually bound", () => {
+		// Silent truncation reads as "this venue only has these markets", which is a different and
+		// much more discouraging statement than "you asked me to look at 5 of them".
+		expect(selectUniverse(venue(), { quoteAssets: ["USD", "USDT"], maxSymbols: 500 }).capped).toBe(false);
 	});
 });

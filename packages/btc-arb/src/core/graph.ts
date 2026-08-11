@@ -98,7 +98,7 @@ export class MarketGraph {
 export function selectUniverse(
 	rules: Iterable<SymbolRules>,
 	filter: UniverseFilter,
-): { selected: SymbolRules[]; rejected: Map<MarketSymbol, string> } {
+): { selected: SymbolRules[]; rejected: Map<MarketSymbol, string>; capped: boolean } {
 	const quoteAssets = filter.quoteAssets && filter.quoteAssets.length > 0 ? new Set(filter.quoteAssets) : undefined;
 	const baseAssets = filter.baseAssets && filter.baseAssets.length > 0 ? new Set(filter.baseAssets) : undefined;
 	const excludeAssets = new Set(filter.excludeAssets ?? []);
@@ -127,15 +127,40 @@ export function selectUniverse(
 		selected.push(rule);
 	}
 
-	// Deterministic ordering, so a truncated universe is reproducible across restarts.
-	selected.sort((a, b) => (a.symbol < b.symbol ? -1 : a.symbol > b.symbol ? 1 : 0));
+	// Ordered by how connected each market's assets are, then by symbol for determinism.
+	//
+	// The cap has to drop *something*, and alphabetical order made that choice arbitrary in a way
+	// that turned out to be actively harmful: on a USD/USDT venue the bridge markets are USDCUSD,
+	// USDCUSDT and USDTUSD, which sort to the very end of the alphabet and were the first to be
+	// cut. Those are the markets that make stablecoin cycles exist at all, so a binding cap deleted
+	// precisely the routes most worth watching and left a table of leaf pairs.
+	//
+	// Ranked by the *less* connected of a market's two assets, not by the sum. To sit on a cycle you
+	// must be able to leave whatever you arrive at, so an asset that appears in only one market is a
+	// dead end however famous its counterpart is. Summing would score every leaf pair quoted in USD
+	// as highly as the USD bridge itself, since both inherit the hub's degree.
+	const degree = new Map<Asset, number>();
+	for (const rule of selected) {
+		degree.set(rule.baseAsset, (degree.get(rule.baseAsset) ?? 0) + 1);
+		degree.set(rule.quoteAsset, (degree.get(rule.quoteAsset) ?? 0) + 1);
+	}
+	const score = (rule: SymbolRules): [number, number] => {
+		const base = degree.get(rule.baseAsset) ?? 0;
+		const quote = degree.get(rule.quoteAsset) ?? 0;
+		return [Math.min(base, quote), base + quote];
+	};
+	selected.sort((a, b) => {
+		const [aMin, aSum] = score(a);
+		const [bMin, bSum] = score(b);
+		return bMin - aMin || bSum - aSum || (a.symbol < b.symbol ? -1 : a.symbol > b.symbol ? 1 : 0);
+	});
 
 	const max = filter.maxSymbols ?? Number.POSITIVE_INFINITY;
 	if (selected.length > max) {
 		for (const rule of selected.slice(max)) rejected.set(rule.symbol, "over maxSymbols cap");
-		return { selected: selected.slice(0, max), rejected };
+		return { selected: selected.slice(0, max), rejected, capped: true };
 	}
-	return { selected, rejected };
+	return { selected, rejected, capped: false };
 }
 
 /**

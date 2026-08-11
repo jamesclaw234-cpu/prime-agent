@@ -198,7 +198,7 @@ export class ArbBot {
 		}
 
 		const all = parseExchangeInfo(info);
-		const { selected, rejected } = selectUniverse(all.values(), {
+		const { selected, rejected, capped } = selectUniverse(all.values(), {
 			quoteAssets: this.config.universe.quoteAssets,
 			baseAssets: this.config.universe.baseAssets,
 			excludeAssets: this.config.universe.excludeAssets,
@@ -229,6 +229,16 @@ export class ArbBot {
 			maxFanout: this.index.maxFanout(),
 			rejected: rejected.size,
 		});
+
+		if (capped) {
+			// Worth a warning rather than a line in the stats: a binding cap silently makes a venue
+			// look smaller than it is, and the difference shows up as missing cycles rather than as
+			// a missing market, which is very hard to notice.
+			this.logger.warn("universe.maxSymbols is binding; some markets were dropped before cycles were enumerated", {
+				cap: this.config.universe.maxSymbols,
+				exchangeSymbols: all.size,
+			});
+		}
 
 		if (cycles.length === 0) {
 			throw new Error(
