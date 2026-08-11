@@ -22,7 +22,7 @@ import { makeFeeModel } from "./core/pricing.js";
 import { Valuation } from "./core/valuation.js";
 import { Dashboard } from "./obs/dashboard.js";
 import { parseRecordedTick } from "./obs/recorder.js";
-import { ArbBot } from "./run/bot.js";
+import { ArbBot, type BotStatus } from "./run/bot.js";
 import type { Cycle, MarketSymbol, SymbolRules } from "./types.js";
 import {
 	type Dec,
@@ -254,6 +254,53 @@ function printSummary(bot: ArbBot): void {
 		"",
 	];
 	process.stdout.write(`${lines.join("\n")}\n`);
+	writeEdgeReport(status.detector);
+}
+
+/**
+ * How close the market actually came, whether or not anything cleared.
+ *
+ * A run that finds nothing is the usual outcome, and the summary above reports it as a row of
+ * zeroes - which cannot distinguish "edges peaked at 5bps, so a better fee tier would change this"
+ * from "edges peaked at -40bps, so nothing will". Those imply opposite decisions, so the
+ * distribution is printed rather than only the threshold crossings.
+ */
+function writeEdgeReport(detector: BotStatus["detector"]): void {
+	const out = process.stdout;
+	const priced = detector.quotesPriced;
+	if (priced === 0) {
+		out.write("no cycle was ever priced: every evaluation hit a missing or stale book.\n");
+		if (detector.staleSkips > 0) {
+			out.write(`  ${detector.staleSkips} evaluations skipped. Raise detection.maxBookAgeMs or check the feed.\n`);
+		}
+		out.write("\n");
+		return;
+	}
+
+	const stale = detector.staleSkips;
+	const total = priced + stale;
+	out.write(`edge distribution  ${priced} cycles priced`);
+	if (stale > 0) {
+		out.write(`, ${stale} skipped on a stale book (${((stale / total) * 100).toFixed(0)}%)`);
+	}
+	out.write("\n");
+	out.write(`best edge seen     ${detector.bestEdgeBps === undefined ? "-" : detector.bestEdgeBps.toFixed(2)}bps\n\n`);
+
+	const bands = Object.entries(detector.edgeHistogram);
+	const widest = Math.max(...bands.map(([, count]) => count), 1);
+	for (const [label, count] of bands) {
+		const bar = "#".repeat(Math.max(1, Math.round((count / widest) * 40)));
+		out.write(`  ${label.padStart(9)} bps  ${String(count).padStart(7)}  ${bar}\n`);
+	}
+
+	const best = Object.entries(detector.bestByCycle).sort(([, a], [, b]) => b - a);
+	if (best.length > 0) {
+		out.write("\n  best per cycle\n");
+		for (const [id, bps] of best.slice(0, 10)) {
+			out.write(`    ${id.padEnd(32)} ${bps.toFixed(2)}bps\n`);
+		}
+	}
+	out.write("\n");
 }
 
 /** Resolves the universe and cycle table without opening a stream. */

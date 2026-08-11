@@ -44,11 +44,35 @@ export interface DetectorOptions {
 export interface DetectorStats {
 	readonly ticks: number;
 	readonly cyclesScreened: number;
+	/** Evaluations that produced a price. The rest hit a stale or missing book and told us nothing. */
+	readonly quotesPriced: number;
+	readonly staleSkips: number;
 	readonly screenPasses: number;
 	readonly planned: number;
 	readonly rejected: number;
 	readonly lastScreenPassAt: number;
 	readonly rejectionsByReason: Readonly<Record<string, number>>;
+	/** Best net edge actually observed, in bps. `undefined` when nothing was ever priced. */
+	readonly bestEdgeBps?: number;
+	/** Best edge seen per cycle, so a venue with one promising loop is not averaged into nothing. */
+	readonly bestByCycle: Readonly<Record<string, number>>;
+	/** Counts of priced edges by bps band, for seeing how far away the market actually is. */
+	readonly edgeHistogram: Readonly<Record<string, number>>;
+}
+
+/**
+ * Upper bounds of the edge bands reported by `stats()`.
+ *
+ * A run that finds nothing is the common case, and "nothing" is not one outcome: edges clustered
+ * at 5bps mean a faster host or a better fee tier could change the answer, while edges at -40bps
+ * mean no amount of tuning will. Without this the two are the same zero.
+ */
+const EDGE_BANDS: readonly number[] = [-100, -50, -20, -10, -5, -2, -1, 0, 1, 2, 4, 6, 8];
+
+function bandLabel(index: number): string {
+	if (index === 0) return `<${EDGE_BANDS[0]}`;
+	if (index === EDGE_BANDS.length) return `>=${EDGE_BANDS[EDGE_BANDS.length - 1]}`;
+	return `${EDGE_BANDS[index - 1]}..${EDGE_BANDS[index]}`;
 }
 
 /**
@@ -69,7 +93,14 @@ export class Detector {
 	private planned = 0;
 	private rejected = 0;
 	private lastScreenPassAt = 0;
+	private quotesPriced = 0;
+	private staleSkips = 0;
+	private bestEdgeBps = Number.NEGATIVE_INFINITY;
 	private readonly rejectionsByReason = new Map<string, number>();
+	// Both are bounded by the cycle table, which is enumerated once at startup, and by a fixed band
+	// count - neither can grow without limit over a 24/7 run.
+	private readonly bestByCycle = new Map<string, number>();
+	private readonly edgeBands = new Float64Array(EDGE_BANDS.length + 1);
 
 	constructor(private readonly options: DetectorOptions) {
 		this.logger = options.logger ?? silentLogger();
@@ -100,7 +131,14 @@ export class Detector {
 	private evaluate(cycle: Cycle, now: number, skipScreen = false): void {
 		this.cyclesScreened++;
 		const quote = quoteCycle(cycle, this.options.store, this.options.fee, now, this.options.maxBookAgeMs);
-		if (!quote) return;
+		if (!quote) {
+			// No price at all - a book was missing or older than `maxBookAgeMs`. Counting this as
+			// "screened and found nothing" would read as an absent edge when it is absent data.
+			this.staleSkips++;
+			return;
+		}
+		this.quotesPriced++;
+		this.observeEdge(cycle, quote.edgeBps);
 		if (!skipScreen && quote.edgeBps < this.screenThresholdBps) return;
 
 		this.screenPasses++;
@@ -147,6 +185,23 @@ export class Detector {
 		this.options.onOpportunity(result.opportunity, result.worstCaseEdgeBps);
 	}
 
+	/** Records where a priced edge landed, whether or not it was anywhere near tradable. */
+	private observeEdge(cycle: Cycle, edgeBps: number): void {
+		if (!Number.isFinite(edgeBps)) return;
+		if (edgeBps > this.bestEdgeBps) this.bestEdgeBps = edgeBps;
+		const previous = this.bestByCycle.get(cycle.id);
+		if (previous === undefined || edgeBps > previous) this.bestByCycle.set(cycle.id, edgeBps);
+
+		let band = EDGE_BANDS.length;
+		for (let i = 0; i < EDGE_BANDS.length; i++) {
+			if (edgeBps < EDGE_BANDS[i]) {
+				band = i;
+				break;
+			}
+		}
+		this.edgeBands[band]++;
+	}
+
 	private recordRejection(cycle: Cycle, screenedEdgeBps: number, code: RejectionCode, reason: string): void {
 		this.rejected++;
 		// Grouped on the stable code, never on the message: the message embeds live numbers, so
@@ -171,6 +226,16 @@ export class Detector {
 			planned: this.planned,
 			rejected: this.rejected,
 			lastScreenPassAt: this.lastScreenPassAt,
+			quotesPriced: this.quotesPriced,
+			staleSkips: this.staleSkips,
+			bestEdgeBps: this.quotesPriced === 0 ? undefined : this.bestEdgeBps,
+			bestByCycle: Object.fromEntries([...this.bestByCycle].map(([id, bps]) => [id, round2(bps)])),
+			edgeHistogram: Object.fromEntries(
+				[...this.edgeBands]
+					.map((count, index) => ({ label: bandLabel(index), count }))
+					.filter((band) => band.count > 0)
+					.map((band) => [band.label, band.count]),
+			),
 			rejectionsByReason: Object.fromEntries(this.rejectionsByReason),
 		};
 	}

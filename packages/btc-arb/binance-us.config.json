@@ -28,7 +28,7 @@
 	"detection": {
 		"maxCycleLength": 3,
 		"minNetEdgeBps": 8,
-		"maxBookAgeMs": 1500,
+		"maxBookAgeMs": 6000,
 		"screenMarginBps": 2,
 		"bellmanFordIntervalMs": 1000,
 		"logEdgeBps": 1

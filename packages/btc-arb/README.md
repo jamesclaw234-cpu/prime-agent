@@ -340,6 +340,14 @@ Two differences that matter, both verified from that spec:
   component only. Pin `fees.takerBps` from your actual fee schedule rather than trusting the
   fallback.
 
+A third difference, found by running it: `detection.maxBookAgeMs` is **6000** in the Binance.US
+profile rather than the 1500 used elsewhere. `bookTicker` only pushes when the book *changes*, so
+on a thin venue a quote can legitimately stand untouched for several seconds — a measured run saw
+gaps of nearly 5s. A 1500ms window treats that as stale data and silently declines to price the
+cycle at all, which on a quiet venue can reject most evaluations without reporting anything. `scan`
+now prints how many evaluations were skipped for exactly this reason; if that share is large, the
+window is too tight for the venue rather than the venue being unprofitable.
+
 And the economic caveat, which matters more than either: Binance.US lists far fewer pairs with much
 thinner books. Triangular arbitrage needs dense cross-pairs to have cycles at all, and the ~30bps
 fee hurdle is unchanged.
@@ -350,6 +358,11 @@ Check both before assuming there is anything there — neither command needs a k
 npx tsx src/cli.ts symbols --config binance-us.config.json   # what cycles exist, and what they cost
 npx tsx src/cli.ts scan    --config binance-us.config.json   # whether any of them ever clear
 ```
+
+`scan` prints the distribution of every edge it priced, not just the ones that cleared — the best
+edge seen, a histogram by band, and the best each cycle ever reached. A run that finds nothing is
+the normal outcome, and this is what separates "edges peaked at 5bps, so a better fee tier would
+change the answer" from "edges peaked at -40bps, so nothing will".
 
 `symbols` prints a `needs` column per cycle: the notional at which that cycle's lot-grid dust
 equals your edge threshold. Thin books cap how much you can put through a cycle, and dust sets a
