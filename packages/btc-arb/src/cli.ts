@@ -254,7 +254,7 @@ function printSummary(bot: ArbBot): void {
 		"",
 	];
 	process.stdout.write(`${lines.join("\n")}\n`);
-	writeEdgeReport(status.detector);
+	writeEdgeReport(status.detector, status.takerBps);
 }
 
 /**
@@ -265,7 +265,7 @@ function printSummary(bot: ArbBot): void {
  * from "edges peaked at -40bps, so nothing will". Those imply opposite decisions, so the
  * distribution is printed rather than only the threshold crossings.
  */
-function writeEdgeReport(detector: BotStatus["detector"]): void {
+function writeEdgeReport(detector: BotStatus["detector"], takerBps: number): void {
 	const out = process.stdout;
 	const priced = detector.quotesPriced;
 	if (priced === 0) {
@@ -284,7 +284,21 @@ function writeEdgeReport(detector: BotStatus["detector"]): void {
 		out.write(`, ${stale} skipped on a stale book (${((stale / total) * 100).toFixed(0)}%)`);
 	}
 	out.write("\n");
-	out.write(`best edge seen     ${detector.bestEdgeBps === undefined ? "-" : detector.bestEdgeBps.toFixed(2)}bps\n\n`);
+	const seenAt = detector.bestEdgeAt ? ` at ${new Date(detector.bestEdgeAt).toISOString().slice(11, 19)}Z` : "";
+	out.write(
+		`best edge seen     ${detector.bestEdgeBps === undefined ? "-" : detector.bestEdgeBps.toFixed(2)}bps${seenAt}\n`,
+	);
+
+	// The fee is a constant, so stripping it back out separates a market that is mispriced but
+	// expensive to trade from one that is simply not mispriced. Only the first is worth chasing.
+	if (detector.bestEdgeBps !== undefined) {
+		const gross = detector.bestEdgeBps + takerBps * 3;
+		out.write(
+			`  before fees      ${gross.toFixed(2)}bps` +
+				`  (${gross > 0 ? "mispriced, but the fee is the obstacle" : "not mispriced: the spreads alone lose money"})\n`,
+		);
+	}
+	out.write("\n");
 
 	const bands = Object.entries(detector.edgeHistogram);
 	const widest = Math.max(...bands.map(([, count]) => count), 1);

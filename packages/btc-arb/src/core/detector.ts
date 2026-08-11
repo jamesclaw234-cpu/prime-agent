@@ -54,6 +54,8 @@ export interface DetectorStats {
 	readonly rejectionsByReason: Readonly<Record<string, number>>;
 	/** Best net edge actually observed, in bps. `undefined` when nothing was ever priced. */
 	readonly bestEdgeBps?: number;
+	/** When that best edge was seen. A long run needs to know *when*, not only how much. */
+	readonly bestEdgeAt?: number;
 	/** Best edge seen per cycle, so a venue with one promising loop is not averaged into nothing. */
 	readonly bestByCycle: Readonly<Record<string, number>>;
 	/** Counts of priced edges by bps band, for seeing how far away the market actually is. */
@@ -96,6 +98,7 @@ export class Detector {
 	private quotesPriced = 0;
 	private staleSkips = 0;
 	private bestEdgeBps = Number.NEGATIVE_INFINITY;
+	private bestEdgeAt = 0;
 	private readonly rejectionsByReason = new Map<string, number>();
 	// Both are bounded by the cycle table, which is enumerated once at startup, and by a fixed band
 	// count - neither can grow without limit over a 24/7 run.
@@ -188,7 +191,10 @@ export class Detector {
 	/** Records where a priced edge landed, whether or not it was anywhere near tradable. */
 	private observeEdge(cycle: Cycle, edgeBps: number): void {
 		if (!Number.isFinite(edgeBps)) return;
-		if (edgeBps > this.bestEdgeBps) this.bestEdgeBps = edgeBps;
+		if (edgeBps > this.bestEdgeBps) {
+			this.bestEdgeBps = edgeBps;
+			this.bestEdgeAt = this.now();
+		}
 		const previous = this.bestByCycle.get(cycle.id);
 		if (previous === undefined || edgeBps > previous) this.bestByCycle.set(cycle.id, edgeBps);
 
@@ -229,6 +235,7 @@ export class Detector {
 			quotesPriced: this.quotesPriced,
 			staleSkips: this.staleSkips,
 			bestEdgeBps: this.quotesPriced === 0 ? undefined : this.bestEdgeBps,
+			bestEdgeAt: this.quotesPriced === 0 ? undefined : this.bestEdgeAt,
 			bestByCycle: Object.fromEntries([...this.bestByCycle].map(([id, bps]) => [id, round2(bps)])),
 			edgeHistogram: Object.fromEntries(
 				[...this.edgeBands]
