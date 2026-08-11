@@ -21,7 +21,7 @@
 	},
 
 	"fees": {
-		"takerBps": 10,
+		"takerBps": 2,
 		"autoDetect": true
 	},
 

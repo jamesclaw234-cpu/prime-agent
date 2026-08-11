@@ -337,8 +337,14 @@ Two differences that matter, both verified from that spec:
   checks your signatures.
 - **`GET /api/v3/account/commission` is absent**, so the three-component fee breakdown cannot be
   read. The bot falls back to the account's `commissionRates` automatically, which is the standard
-  component only. Pin `fees.takerBps` from your actual fee schedule rather than trusting the
-  fallback.
+  component only. Confirm the rate `doctor` reports against your own fee schedule.
+
+The profile ships `fees.takerBps: 2`, not the 10 used elsewhere. As of April 2026 Binance.US
+charges 0% maker and 0.02% taker on all spot pairs with no volume tiers, and 0.01% on some — which
+makes a three-leg cycle cost about **6bps rather than 30**. That is by a wide margin the cheapest
+taker fee available to a US retail account, so it is worth confirming with `doctor` rather than
+assuming the 10bps that is standard elsewhere: a fee assumption that is 5x too high makes every
+cycle look 24bps worse than it is, which is enough to hide a real opportunity.
 
 A third difference, found by running it: `detection.maxBookAgeMs` is **6000** in the Binance.US
 profile rather than the 1500 used elsewhere. `bookTicker` only pushes when the book *changes*, so
