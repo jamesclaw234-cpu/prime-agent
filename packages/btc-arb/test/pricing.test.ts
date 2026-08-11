@@ -203,3 +203,57 @@ describe("commission rates", () => {
 		expect(effectiveTakerBps(COMMISSION)).toBeGreaterThan(standardOnly);
 	});
 });
+
+describe("adaptive book freshness", () => {
+	/**
+	 * `bookTicker` pushes only when the book changes, so on a thin market an untouched quote is
+	 * current rather than stale — the exchange has nothing new to say about it. A single global
+	 * window judges a symbol that ticks twice a minute by the standards of one that ticks ten times
+	 * a second, and a measured Binance.US scan discarded 85% of its evaluations that way.
+	 */
+	it("widens the window for a symbol that genuinely updates slowly", () => {
+		const store = new BookStore();
+		// Three updates twenty seconds apart: this market simply does not move often.
+		for (let i = 0; i < 4; i++) {
+			store.apply(makeBook("ETHBTC", d("0.09"), d("100"), d("0.1"), d("100"), i + 1, i * 20_000));
+		}
+		expect(store.cadenceOf("ETHBTC")).toBeGreaterThan(15_000);
+		// Held to the base window it would be discarded; allowed its own rhythm it is usable.
+		expect(store.ageLimitFor("ETHBTC", 1500, 30_000)).toBeGreaterThan(30_000 - 1);
+		expect(store.ageLimitFor("ETHBTC", 1500, 0)).toBe(1500);
+	});
+
+	it("keeps a fast symbol on the tight window rather than relaxing everything", () => {
+		const store = new BookStore();
+		for (let i = 0; i < 20; i++) {
+			store.apply(makeBook("BTCUSDT", d("99"), d("10"), d("100"), d("10"), i + 1, i * 50));
+		}
+		// 50ms cadence: four times that is still far under the base, so the base wins.
+		expect(store.ageLimitFor("BTCUSDT", 1500, 30_000)).toBe(1500);
+	});
+
+	it("never widens past the ceiling, however quiet the market is", () => {
+		const store = new BookStore();
+		for (let i = 0; i < 4; i++) {
+			store.apply(makeBook("ADABTC", d("0.09"), d("100"), d("0.1"), d("100"), i + 1, i * 600_000));
+		}
+		expect(store.ageLimitFor("ADABTC", 1500, 30_000)).toBe(30_000);
+	});
+
+	it("prices a slow-but-healthy cycle that a single global window would discard", () => {
+		const now = 1_000_000;
+		const store = new BookStore(() => now);
+		// Seed twice per symbol so a cadence exists, with the last update 8s ago.
+		for (const [symbol, quote] of Object.entries(PROFITABLE)) {
+			store.apply(makeBook(symbol, d(quote.bid), d(quote.bidQty), d(quote.ask), d(quote.askQty), 1, now - 28_000));
+			store.apply(makeBook(symbol, d(quote.bid), d(quote.bidQty), d(quote.ask), d(quote.askQty), 2, now - 8_000));
+		}
+
+		// Base window alone: every book is 8s old against a 1.5s limit, so nothing prices.
+		expect(quoteCycle(TRIANGLE, store, FEE_10BPS, now, 1500)).toBeUndefined();
+		// With a ceiling, each symbol's own 20s cadence makes 8s ordinary and the cycle prices.
+		const quote = quoteCycle(TRIANGLE, store, FEE_10BPS, now, 1500, 30_000);
+		expect(quote).toBeDefined();
+		expect(quote?.edgeBps).toBeGreaterThan(0);
+	});
+});

@@ -341,12 +341,28 @@ async function commandSymbols(args: ParsedArgs): Promise<number> {
 	});
 	const index = new CycleIndex(cycles);
 
+	// Length 4 is supported but off by default, and on a venue with few crypto-crypto crosses it is
+	// often the difference between a handful of cycles and a usable table. Reporting the count
+	// costs one more enumeration over a graph already in memory, so there is no reason to make
+	// someone edit a config file to find out whether it would help.
+	const longer =
+		config.detection.maxCycleLength < 4
+			? enumerateCycles(graph, {
+					startAssets: config.execution.startAssets,
+					maxLength: 4,
+					requireAsset: config.universe.requireAsset,
+				})
+			: undefined;
+
 	const out = process.stdout;
 	out.write(`exchange symbols   ${all.size}\n`);
 	out.write(`selected           ${selected.length} (rejected ${rejected.size})\n`);
 	out.write(`after dead-end prune ${pruned.length}\n`);
 	out.write(`assets             ${graph.assets.length}\n`);
-	out.write(`cycles             ${cycles.length}\n`);
+	out.write(`cycles             ${cycles.length} at maxCycleLength ${config.detection.maxCycleLength}\n`);
+	if (longer) {
+		out.write(`                   ${longer.length} at maxCycleLength 4 (set detection.maxCycleLength to use them)\n`);
+	}
 	out.write(`subscribed markets ${index.usedSymbols().length}\n`);
 	out.write(`max fanout         ${index.maxFanout()} cycles re-priced per tick, worst case\n\n`);
 	// Price the lot grid. Dust is a fixed cost per cycle, so the notional it needs to disappear
@@ -370,16 +386,38 @@ async function commandSymbols(args: ParsedArgs): Promise<number> {
 	const unit = config.risk.accountingAsset;
 	const edge = config.detection.minNetEdgeBps;
 
+	// Cheapest first. The interesting cycle on a venue is almost never the famous one - it is
+	// whichever has the finest lot grid relative to its price, and that ordering is not obvious
+	// from the names.
+	const budget = config.execution.maxNotionalPerCycle;
+	const rows = cycles
+		.map((cycle) => {
+			const dust = expectedDust(cycle, all, store, valuation);
+			return { cycle, dust, needs: dust === undefined || edge <= 0 ? undefined : (dust * 10_000) / edge };
+		})
+		.sort((a, b) => (a.needs ?? Number.POSITIVE_INFINITY) - (b.needs ?? Number.POSITIVE_INFINITY));
+
+	const runnable = rows.filter((row) => row.needs !== undefined && row.needs <= budget);
 	out.write(`  ${"cycle".padEnd(32)} ${"legs".padEnd(44)} ${"dust".padStart(9)}  ${"needs".padStart(10)}\n`);
-	for (const cycle of cycles.slice(0, 40)) {
-		const legs = cycle.legs.map((l) => `${l.side} ${l.symbol}`).join(" -> ");
-		const dust = expectedDust(cycle, all, store, valuation);
-		const needs = dust === undefined || edge <= 0 ? undefined : (dust * 10_000) / edge;
+	for (const row of rows.slice(0, 40)) {
+		const legs = row.cycle.legs.map((l) => `${l.side} ${l.symbol}`).join(" -> ");
+		const mark = row.needs !== undefined && row.needs <= budget ? " *" : "";
 		out.write(
-			`  ${cycle.id.padEnd(32)} ${legs.padEnd(44)} ${(dust === undefined ? "-" : dust.toFixed(4)).padStart(9)}  ${(needs === undefined ? "-" : Math.ceil(needs).toLocaleString()).padStart(10)}\n`,
+			`  ${row.cycle.id.padEnd(32)} ${legs.padEnd(44)} ${(row.dust === undefined ? "-" : row.dust.toFixed(4)).padStart(9)}  ${(row.needs === undefined ? "-" : Math.ceil(row.needs).toLocaleString()).padStart(10)}${mark}\n`,
 		);
 	}
-	if (cycles.length > 40) out.write(`  ... and ${cycles.length - 40} more\n`);
+	if (rows.length > 40) out.write(`  ... and ${rows.length - 40} more\n`);
+	out.write(
+		`\n  ${runnable.length} of ${rows.length} cycles clear their own lot grid at your ` +
+			`execution.maxNotionalPerCycle of ${budget} ${unit}${runnable.length > 0 ? " (marked *)" : ""}.\n`,
+	);
+	if (runnable.length === 0 && rows.some((row) => row.needs !== undefined)) {
+		const cheapest = rows.find((row) => row.needs !== undefined);
+		out.write(
+			`  The cheapest needs ${Math.ceil(cheapest?.needs ?? 0).toLocaleString()} ${unit} per cycle. Below that the\n` +
+				`  lot grid costs more than the ${edge}bps you are asking each cycle to earn.\n`,
+		);
+	}
 	out.write(
 		`\n  dust  = ${unit} left behind per cycle, on average, because each leg's output rounds down to the\n` +
 			`          next symbol's lot step. It stays in the account but cannot be sold: it is below minQty.\n` +

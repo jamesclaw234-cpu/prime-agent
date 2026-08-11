@@ -29,6 +29,7 @@ export interface DetectorOptions {
 	/** How far below `minNetEdgeBps` the float screen fires. Wider means fewer missed candidates. */
 	readonly screenMarginBps: number;
 	readonly maxBookAgeMs: number;
+	readonly maxBookAgeCeilingMs?: number;
 	readonly depthUtilization: number;
 	readonly aggressionTicks: number;
 	readonly requireNonNegativeWorstCase: boolean;
@@ -133,7 +134,14 @@ export class Detector {
 
 	private evaluate(cycle: Cycle, now: number, skipScreen = false): void {
 		this.cyclesScreened++;
-		const quote = quoteCycle(cycle, this.options.store, this.options.fee, now, this.options.maxBookAgeMs);
+		const quote = quoteCycle(
+			cycle,
+			this.options.store,
+			this.options.fee,
+			now,
+			this.options.maxBookAgeMs,
+			this.options.maxBookAgeCeilingMs,
+		);
 		if (!quote) {
 			// No price at all - a book was missing or older than `maxBookAgeMs`. Counting this as
 			// "screened and found nothing" would read as an absent edge when it is absent data.
@@ -166,6 +174,9 @@ export class Detector {
 			requireNonNegativeWorstCase: this.options.requireNonNegativeWorstCase,
 			now,
 			maxBookAgeMs: this.options.maxBookAgeMs,
+			// The exact re-derivation must use the same window as the screen, or a cycle that just
+			// passed is rejected a microsecond later for a book the screen had already accepted.
+			maxBookAgeCeilingMs: this.options.maxBookAgeCeilingMs,
 			valuation: this.options.valuation,
 		};
 

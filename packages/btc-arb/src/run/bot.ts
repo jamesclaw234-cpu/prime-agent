@@ -396,6 +396,7 @@ export class ArbBot {
 			minNetEdgeBps: this.config.detection.minNetEdgeBps,
 			screenMarginBps: this.config.detection.screenMarginBps,
 			maxBookAgeMs: this.config.detection.maxBookAgeMs,
+			maxBookAgeCeilingMs: this.config.detection.maxBookAgeCeilingMs,
 			depthUtilization: this.config.execution.depthUtilization,
 			aggressionTicks: this.config.execution.aggressionTicks,
 			requireNonNegativeWorstCase: this.config.execution.requireNonNegativeWorstCase,

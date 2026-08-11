@@ -10,6 +10,8 @@ import { type Dec, decFromString, decIsPositive, decToNumber } from "../util/dec
  */
 export class BookStore {
 	private readonly books = new Map<MarketSymbol, TopOfBook>();
+	/** Smoothed gap between updates, per symbol. Bounded by the symbol count, like `books`. */
+	private readonly cadence = new Map<MarketSymbol, number>();
 	private updates = 0;
 	private stale = 0;
 
@@ -28,9 +30,44 @@ export class BookStore {
 			this.stale++;
 			return false;
 		}
+		if (existing) {
+			// Exponentially smoothed, so one quiet stretch does not permanently widen the window and
+			// one burst does not permanently narrow it.
+			const gap = book.receivedAt - existing.receivedAt;
+			if (gap > 0) {
+				const previous = this.cadence.get(book.symbol);
+				this.cadence.set(book.symbol, previous === undefined ? gap : previous * 0.8 + gap * 0.2);
+			}
+		}
 		this.books.set(book.symbol, book);
 		this.updates++;
 		return true;
+	}
+
+	/**
+	 * How long this symbol typically goes between updates, in milliseconds.
+	 *
+	 * `bookTicker` pushes only when the book *changes*, so on a thin market a quote standing
+	 * untouched for thirty seconds is current rather than stale - the exchange has nothing new to
+	 * say about it. Judging every symbol by one global window therefore discards most of the data
+	 * on exactly the venues where each observation is scarcest.
+	 */
+	cadenceOf(symbol: MarketSymbol): number | undefined {
+		return this.cadence.get(symbol);
+	}
+
+	/**
+	 * The age past which this symbol's book should not be trusted.
+	 *
+	 * Never tighter than `base`, never wider than `ceiling`, and in between it follows the symbol's
+	 * own rhythm. A dead socket is not this function's job: the feed's own watchdog covers it, and
+	 * a combined stream cannot lose one symbol while the others keep flowing.
+	 */
+	ageLimitFor(symbol: MarketSymbol, base: number, ceiling: number): number {
+		if (ceiling <= base) return base;
+		const typical = this.cadence.get(symbol);
+		if (typical === undefined) return base;
+		return Math.min(ceiling, Math.max(base, typical * 4));
 	}
 
 	get(symbol: MarketSymbol): TopOfBook | undefined {

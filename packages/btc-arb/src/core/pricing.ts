@@ -121,6 +121,8 @@ export function quoteCycle(
 	fee: FeeModel,
 	now: number,
 	maxBookAgeMs: number,
+	/** Upper bound for the per-symbol window. Equal to or below `maxBookAgeMs` disables widening. */
+	ageCeilingMs = 0,
 ): CycleQuote | undefined {
 	let multiple = 1;
 	let oldest = 0;
@@ -129,7 +131,7 @@ export function quoteCycle(
 		const book = store.get(leg.symbol);
 		if (!book) return undefined;
 		const age = now - book.receivedAt;
-		if (age > maxBookAgeMs) return undefined;
+		if (age > store.ageLimitFor(leg.symbol, maxBookAgeMs, ageCeilingMs)) return undefined;
 		if (age > oldest) oldest = age;
 		multiple *= edgeRateNum(book, leg.side, fee.takerMultiplierNum);
 	}

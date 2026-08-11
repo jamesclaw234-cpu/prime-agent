@@ -29,6 +29,7 @@
 		"maxCycleLength": 3,
 		"minNetEdgeBps": 8,
 		"maxBookAgeMs": 1500,
+		"maxBookAgeCeilingMs": 10000,
 		"screenMarginBps": 2,
 		"bellmanFordIntervalMs": 1000,
 		"logEdgeBps": 5

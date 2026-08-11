@@ -346,13 +346,24 @@ taker fee available to a US retail account, so it is worth confirming with `doct
 assuming the 10bps that is standard elsewhere: a fee assumption that is 5x too high makes every
 cycle look 24bps worse than it is, which is enough to hide a real opportunity.
 
-A third difference, found by running it: `detection.maxBookAgeMs` is **6000** in the Binance.US
-profile rather than the 1500 used elsewhere. `bookTicker` only pushes when the book *changes*, so
+A third difference, found by running it: the Binance.US profile sets `detection.maxBookAgeMs` to
+**6000** rather than the 1500 used elsewhere, and `maxBookAgeCeilingMs` to **30000**. `bookTicker` only pushes when the book *changes*, so
 on a thin venue a quote can legitimately stand untouched for several seconds — a measured run saw
 gaps of nearly 5s. A 1500ms window treats that as stale data and silently declines to price the
 cycle at all, which on a quiet venue can reject most evaluations without reporting anything. `scan`
 now prints how many evaluations were skipped for exactly this reason; if that share is large, the
 window is too tight for the venue rather than the venue being unprofitable.
+
+`maxBookAgeCeilingMs` is what fixes that properly. Above `maxBookAgeMs`, each symbol gets a window
+that follows *its own* update cadence, capped at the ceiling — so a market that ticks twice a
+minute is not judged by the standard of one that ticks ten times a second. A measured Binance.US
+scan discarded 85% of its evaluations to a single global window. Set the ceiling to 0 to hold every
+symbol to one window instead.
+
+This is safe for the reason the problem exists: `bookTicker` pushes on *every* change, so a quote
+that has not been re-sent has not moved, and a socket that dies silently is caught by the feed's own
+staleness watchdog rather than by this. The executor still uses the strict `maxBookAgeMs` when it
+prices an actual order.
 
 And the economic caveat, which matters more than either: Binance.US lists far fewer pairs with much
 thinner books. Triangular arbitrage needs dense cross-pairs to have cycles at all, and the ~30bps
@@ -364,6 +375,11 @@ Check both before assuming there is anything there — neither command needs a k
 npx tsx src/cli.ts symbols --config binance-us.config.json   # what cycles exist, and what they cost
 npx tsx src/cli.ts scan    --config binance-us.config.json   # whether any of them ever clear
 ```
+
+`symbols` also reports how many cycles exist at `maxCycleLength` 4, which is off by default. On a
+venue with few crypto-crypto crosses that is often the difference between a handful of cycles and a
+usable table — at the cost of a fourth fee and a third dust remainder, both of which the same
+columns price for you.
 
 `scan` prints the distribution of every edge it priced, not just the ones that cleared — the best
 edge seen, a histogram by band, and the best each cycle ever reached. A run that finds nothing is

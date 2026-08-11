@@ -68,6 +68,14 @@ export interface DetectionConfig {
 	readonly minNetEdgeBps: number;
 	/** Reject any decision made on a book frame older than this. */
 	readonly maxBookAgeMs: number;
+	/**
+	 * Upper bound for the per-symbol freshness window.
+	 *
+	 * `bookTicker` pushes only on change, so an untouched quote on a thin market is current rather
+	 * than stale. Above `maxBookAgeMs`, each symbol is allowed a window that follows its own update
+	 * cadence, capped here. Set equal to or below `maxBookAgeMs` to hold every symbol to one window.
+	 */
+	readonly maxBookAgeCeilingMs: number;
 	/** Float pre-screen threshold, set below `minNetEdgeBps` so screening never hides a real edge. */
 	readonly screenMarginBps: number;
 	/** Interval for the background n-leg negative-cycle sweep. Zero disables it. */
@@ -202,6 +210,7 @@ export const DEFAULT_CONFIG: ArbConfig = {
 		maxCycleLength: 3,
 		minNetEdgeBps: 8,
 		maxBookAgeMs: 1500,
+		maxBookAgeCeilingMs: 10_000,
 		screenMarginBps: 2,
 		bellmanFordIntervalMs: 1000,
 		logEdgeBps: 0,
@@ -459,6 +468,9 @@ export function validateConfig(config: ArbConfig): void {
 	}
 	requireNonNegative(config.detection.minNetEdgeBps, "detection.minNetEdgeBps");
 	requirePositive(config.detection.maxBookAgeMs, "detection.maxBookAgeMs");
+	if (config.detection.maxBookAgeCeilingMs < 0) {
+		throw new ConfigError("detection.maxBookAgeCeilingMs must not be negative");
+	}
 	requireNonNegative(config.detection.screenMarginBps, "detection.screenMarginBps");
 	if (config.detection.screenMarginBps > config.detection.minNetEdgeBps) {
 		throw new ConfigError("detection.screenMarginBps cannot exceed detection.minNetEdgeBps");

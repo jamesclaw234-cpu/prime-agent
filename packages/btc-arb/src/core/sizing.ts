@@ -33,6 +33,7 @@ export interface SizingInputs {
 	readonly requireNonNegativeWorstCase: boolean;
 	readonly now: number;
 	readonly maxBookAgeMs: number;
+	readonly maxBookAgeCeilingMs?: number;
 	/** Converts leg 1's spend into the accounting asset so risk limits can be applied to it. */
 	readonly valuation?: { convert(amount: Dec, asset: Asset): Dec | undefined };
 }
@@ -91,9 +92,9 @@ function fail(code: SizingRejection, reason: string, leg?: number): SizingResult
  * that is the function working correctly.
  */
 export function planOpportunity(inputs: SizingInputs): SizingResult {
-	const { cycle, store, rules, fee, now, maxBookAgeMs } = inputs;
+	const { cycle, store, rules, fee, now, maxBookAgeMs, maxBookAgeCeilingMs } = inputs;
 
-	const quote = quoteCycle(cycle, store, fee, now, maxBookAgeMs);
+	const quote = quoteCycle(cycle, store, fee, now, maxBookAgeMs, maxBookAgeCeilingMs);
 	if (!quote) return fail("book_missing_or_stale", "book missing or stale");
 
 	const contexts: LegContext[] = [];

@@ -260,3 +260,26 @@ describe("shipped config profiles", () => {
 		).toThrow(/testnet is enabled but/);
 	});
 });
+
+describe("adaptive book freshness", () => {
+	it("treats a ceiling at or below the base window as no widening", () => {
+		// Raising `maxBookAgeMs` past the shipped ceiling is ordinary; it must not become an error,
+		// and the tighter of the two is always what applies.
+		const config = loadConfig({
+			env: {},
+			overrides: { detection: { maxBookAgeMs: 60_000, maxBookAgeCeilingMs: 10_000 } },
+		});
+		expect(config.detection.maxBookAgeMs).toBe(60_000);
+		expect(config.detection.maxBookAgeCeilingMs).toBe(10_000);
+	});
+
+	it("accepts zero as the documented way to hold every symbol to one window", () => {
+		expect(
+			loadConfig({ env: {}, overrides: { detection: { maxBookAgeCeilingMs: 0 } } }).detection.maxBookAgeCeilingMs,
+		).toBe(0);
+	});
+
+	it("rejects a negative ceiling", () => {
+		expect(() => loadConfig({ env: {}, overrides: { detection: { maxBookAgeCeilingMs: -1 } } })).toThrow(ConfigError);
+	});
+});
