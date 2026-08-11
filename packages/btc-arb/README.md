@@ -360,6 +360,12 @@ minute is not judged by the standard of one that ticks ten times a second. A mea
 scan discarded 85% of its evaluations to a single global window. Set the ceiling to 0 to hold every
 symbol to one window instead.
 
+`detection.maxQuoteSkewMs` is the guard that widening makes necessary. A cycle whose legs are each
+individually fresh can still be incoherent — a loop priced from a 10ms-old quote and a 4s-old one
+describes a market that existed at no single instant, and the apparent edge is usually just the
+newer leg having moved. Age cannot catch it, because any window wide enough to admit the older
+quote admits the newer one too. Uniformly stale is fine; *unevenly* stale is not.
+
 This is safe for the reason the problem exists: `bookTicker` pushes on *every* change, so a quote
 that has not been re-sent has not moved, and a socket that dies silently is caught by the feed's own
 staleness watchdog rather than by this. The executor still uses the strict `maxBookAgeMs` when it

@@ -30,6 +30,7 @@ export interface DetectorOptions {
 	readonly screenMarginBps: number;
 	readonly maxBookAgeMs: number;
 	readonly maxBookAgeCeilingMs?: number;
+	readonly maxQuoteSkewMs?: number;
 	readonly depthUtilization: number;
 	readonly aggressionTicks: number;
 	readonly requireNonNegativeWorstCase: boolean;
@@ -141,6 +142,7 @@ export class Detector {
 			now,
 			this.options.maxBookAgeMs,
 			this.options.maxBookAgeCeilingMs,
+			this.options.maxQuoteSkewMs,
 		);
 		if (!quote) {
 			// No price at all - a book was missing or older than `maxBookAgeMs`. Counting this as
@@ -177,6 +179,7 @@ export class Detector {
 			// The exact re-derivation must use the same window as the screen, or a cycle that just
 			// passed is rejected a microsecond later for a book the screen had already accepted.
 			maxBookAgeCeilingMs: this.options.maxBookAgeCeilingMs,
+			maxQuoteSkewMs: this.options.maxQuoteSkewMs,
 			valuation: this.options.valuation,
 		};
 

@@ -257,3 +257,45 @@ describe("adaptive book freshness", () => {
 		expect(quote?.edgeBps).toBeGreaterThan(0);
 	});
 });
+
+describe("quote skew", () => {
+	/**
+	 * Adopted from another implementation of this strategy, which had it and this one did not.
+	 *
+	 * Age alone cannot catch an incoherent cycle: a window wide enough to admit a 4s-old quote also
+	 * admits a 10ms-old one, and the pair describes a market that never existed at any single
+	 * instant. The apparent edge is usually just the newer leg having moved.
+	 */
+	const now = 1_000_000;
+
+	function skewedStore(ages: Record<string, number>): BookStore {
+		const store = new BookStore(() => now);
+		let updateId = 1;
+		for (const [symbol, age] of Object.entries(ages)) {
+			const quote = PROFITABLE[symbol];
+			store.apply(
+				makeBook(symbol, d(quote.bid), d(quote.bidQty), d(quote.ask), d(quote.askQty), updateId++, now - age),
+			);
+		}
+		return store;
+	}
+
+	it("rejects a cycle assembled from quotes taken at very different moments", () => {
+		const store = skewedStore({ BTCUSDT: 10, ETHBTC: 4000, ETHUSDT: 20 });
+		// Every leg is individually inside a 5s window, so the age check passes it.
+		expect(quoteCycle(TRIANGLE, store, FEE_10BPS, now, 5000)).toBeDefined();
+		// The 3.99s spread between freshest and stalest is what makes it meaningless.
+		expect(quoteCycle(TRIANGLE, store, FEE_10BPS, now, 5000, 0, 1000)).toBeUndefined();
+	});
+
+	it("accepts a cycle whose quotes are old but arrived together", () => {
+		// Uniformly stale is coherent: the whole market simply has not moved.
+		const store = skewedStore({ BTCUSDT: 3800, ETHBTC: 4000, ETHUSDT: 3900 });
+		expect(quoteCycle(TRIANGLE, store, FEE_10BPS, now, 5000, 0, 1000)).toBeDefined();
+	});
+
+	it("treats zero as disabled", () => {
+		const store = skewedStore({ BTCUSDT: 10, ETHBTC: 4000, ETHUSDT: 20 });
+		expect(quoteCycle(TRIANGLE, store, FEE_10BPS, now, 5000, 0, 0)).toBeDefined();
+	});
+});

@@ -123,9 +123,12 @@ export function quoteCycle(
 	maxBookAgeMs: number,
 	/** Upper bound for the per-symbol window. Equal to or below `maxBookAgeMs` disables widening. */
 	ageCeilingMs = 0,
+	/** Maximum spread between the freshest and stalest quote in the cycle. Zero disables the check. */
+	maxSkewMs = 0,
 ): CycleQuote | undefined {
 	let multiple = 1;
 	let oldest = 0;
+	let newest = Number.POSITIVE_INFINITY;
 
 	for (const leg of cycle.legs) {
 		const book = store.get(leg.symbol);
@@ -133,8 +136,15 @@ export function quoteCycle(
 		const age = now - book.receivedAt;
 		if (age > store.ageLimitFor(leg.symbol, maxBookAgeMs, ageCeilingMs)) return undefined;
 		if (age > oldest) oldest = age;
+		if (age < newest) newest = age;
 		multiple *= edgeRateNum(book, leg.side, fee.takerMultiplierNum);
 	}
+
+	// Every leg being individually fresh does not make the cycle coherent. A loop priced from a
+	// 10ms-old quote and a 4s-old one describes a market that never existed at any single instant,
+	// and the apparent edge is usually just the newer leg having moved. Age alone cannot catch it:
+	// both quotes pass any window wide enough to admit the older one.
+	if (maxSkewMs > 0 && oldest - newest > maxSkewMs) return undefined;
 
 	return {
 		cycle,

@@ -76,6 +76,14 @@ export interface DetectionConfig {
 	 * cadence, capped here. Set equal to or below `maxBookAgeMs` to hold every symbol to one window.
 	 */
 	readonly maxBookAgeCeilingMs: number;
+	/**
+	 * Maximum spread between the freshest and stalest quote in one cycle.
+	 *
+	 * Every leg being individually fresh does not make the cycle coherent: a loop priced from a
+	 * 10ms-old quote and a 4s-old one describes a market that never existed at any single instant.
+	 * Zero disables the check.
+	 */
+	readonly maxQuoteSkewMs: number;
 	/** Float pre-screen threshold, set below `minNetEdgeBps` so screening never hides a real edge. */
 	readonly screenMarginBps: number;
 	/** Interval for the background n-leg negative-cycle sweep. Zero disables it. */
@@ -211,6 +219,7 @@ export const DEFAULT_CONFIG: ArbConfig = {
 		minNetEdgeBps: 8,
 		maxBookAgeMs: 1500,
 		maxBookAgeCeilingMs: 10_000,
+		maxQuoteSkewMs: 1500,
 		screenMarginBps: 2,
 		bellmanFordIntervalMs: 1000,
 		logEdgeBps: 0,
@@ -470,6 +479,9 @@ export function validateConfig(config: ArbConfig): void {
 	requirePositive(config.detection.maxBookAgeMs, "detection.maxBookAgeMs");
 	if (config.detection.maxBookAgeCeilingMs < 0) {
 		throw new ConfigError("detection.maxBookAgeCeilingMs must not be negative");
+	}
+	if (config.detection.maxQuoteSkewMs < 0) {
+		throw new ConfigError("detection.maxQuoteSkewMs must not be negative");
 	}
 	requireNonNegative(config.detection.screenMarginBps, "detection.screenMarginBps");
 	if (config.detection.screenMarginBps > config.detection.minNetEdgeBps) {

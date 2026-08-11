@@ -30,6 +30,7 @@
 		"minNetEdgeBps": 8,
 		"maxBookAgeMs": 6000,
 		"maxBookAgeCeilingMs": 30000,
+		"maxQuoteSkewMs": 2000,
 		"screenMarginBps": 2,
 		"bellmanFordIntervalMs": 1000,
 		"logEdgeBps": 1
