@@ -396,3 +396,92 @@ describe("venue parameter strictness", () => {
 		expect(bot.status().ledger.cycles).toBeGreaterThanOrEqual(1);
 	}, 30_000);
 });
+
+describe("the fake refuses what the exchange refuses", () => {
+	/**
+	 * The fake's whole contract is that a test passing against it means the request would have been
+	 * accepted by Binance. It used to fill any marketable price/qty string and skip the funds check
+	 * for unmatched orders, so a rounding regression in the bot's own filter code - exactly the
+	 * code under test - would sail through the suite and first fail live as -1013 mid-cycle.
+	 */
+	async function rawClient(fake: FakeBinance, restBaseUrl: string): Promise<BinanceRestClient> {
+		return new BinanceRestClient({
+			baseUrl: restBaseUrl,
+			apiKey: fake.apiKey,
+			apiSecret: fake.apiSecret,
+			recvWindowMs: 5000,
+			timeoutMs: 5000,
+			orderTimeoutMs: 11_000,
+			limiter: new RateLimiter({ limits: [...DEFAULT_LIMITS], safetyFactor: 0.7 }),
+		});
+	}
+
+	it("rejects an off-grid price with -1013 instead of filling it", async () => {
+		const fake = new FakeBinance({ quotes: QUOTES, balances: { USDT: "100000" } });
+		const { restBaseUrl } = await fake.start();
+		try {
+			const client = await rawClient(fake, restBaseUrl);
+			// BTCUSDT tick is 0.01; 100.005 is between ticks. A marketable BUY, but malformed.
+			await expect(
+				client.newOrder({
+					symbol: "BTCUSDT",
+					side: "BUY",
+					type: "LIMIT",
+					timeInForce: "IOC",
+					quantity: "0.10000",
+					price: "100.005",
+				}),
+			).rejects.toMatchObject({ code: -1013 });
+		} finally {
+			await fake.stop();
+		}
+	});
+
+	it("rejects an order the account cannot fund at the LIMIT price, even if it would not match", async () => {
+		// Binance locks limit * origQty at placement. A limit far above the touch with a big qty
+		// must be refused -2010 upfront, not filled for whatever depth happens to be displayed.
+		const fake = new FakeBinance({ quotes: QUOTES, balances: { USDT: "100" } });
+		const { restBaseUrl } = await fake.start();
+		try {
+			const client = await rawClient(fake, restBaseUrl);
+			await expect(
+				client.newOrder({
+					symbol: "BTCUSDT",
+					side: "BUY",
+					type: "LIMIT",
+					timeInForce: "IOC",
+					quantity: "2.00000",
+					price: "101.00",
+				}),
+			).rejects.toMatchObject({ code: -2010 });
+		} finally {
+			await fake.stop();
+		}
+	});
+
+	it("scopes order lookup to the symbol, the way reconciliation depends on", async () => {
+		// resolveOrder treats -2013 as proof an order never reached the book. A fake that found
+		// orders by client id alone would keep that proof meaningless.
+		const fake = new FakeBinance({ quotes: QUOTES, balances: { USDT: "100000" } });
+		const { restBaseUrl } = await fake.start();
+		try {
+			const client = await rawClient(fake, restBaseUrl);
+			await client.newOrder({
+				symbol: "BTCUSDT",
+				side: "BUY",
+				type: "LIMIT",
+				timeInForce: "IOC",
+				quantity: "0.10000",
+				price: "100.00",
+				newClientOrderId: "scoped-1",
+			});
+			const found = await client.queryOrder("BTCUSDT", { origClientOrderId: "scoped-1" });
+			expect(found.clientOrderId).toBe("scoped-1");
+			await expect(client.queryOrder("ETHUSDT", { origClientOrderId: "scoped-1" })).rejects.toMatchObject({
+				code: -2013,
+			});
+		} finally {
+			await fake.stop();
+		}
+	});
+});

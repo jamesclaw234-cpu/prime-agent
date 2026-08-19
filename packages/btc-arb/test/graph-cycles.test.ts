@@ -38,10 +38,42 @@ describe("universe selection", () => {
 		expect(byAsset.selected.map((r) => r.symbol)).toEqual(["BTCUSDT"]);
 	});
 
-	it("caps the universe deterministically", () => {
+	it("caps the universe deterministically, without keeping half of an asset's pair", () => {
+		// A cap of 2 cannot fit ETH's whole pair, and keeping only one of its legs would waste the
+		// slot: the lone leg makes ETH degree-1 and dead-end pruning deletes it anyway. The honest
+		// selection is the bridge alone, and both ETH legs rejected on the cap.
 		const { selected, rejected } = selectUniverse(THREE, { quoteAssets: ["USDT", "BTC"], maxSymbols: 2 });
-		expect(selected.map((r) => r.symbol)).toEqual(["BTCUSDT", "ETHBTC"]);
+		expect(selected.map((r) => r.symbol)).toEqual(["BTCUSDT"]);
+		expect(rejected.get("ETHBTC")).toContain("maxSymbols");
 		expect(rejected.get("ETHUSDT")).toContain("maxSymbols");
+		// With room for the whole pair, all three are kept.
+		const roomy = selectUniverse(THREE, { quoteAssets: ["USDT", "BTC"], maxSymbols: 3 });
+		expect(roomy.selected).toHaveLength(3);
+		expect(roomy.capped).toBe(false);
+	});
+
+	it("keeps whole asset pairs under a binding cap instead of pruning to zero cycles", () => {
+		// Regression for the second-generation cap bug: per-market connectivity ranking tied every
+		// dual-quoted asset, the tiebreak grouped markets BY QUOTE, and a binding cap kept one leg
+		// of each asset's pair - all of which dead-end pruning then deleted. In a two-quote universe
+		// the entire selection pruned to zero cycles.
+		const rules: SymbolRules[] = [makeRules({ symbol: "BTCUSDT", baseAsset: "BTC", quoteAsset: "USDT" })];
+		for (let i = 0; i < 30; i++) {
+			const base = `A${String(i).padStart(2, "0")}`;
+			rules.push(makeRules({ symbol: `${base}USDT`, baseAsset: base, quoteAsset: "USDT" }));
+			rules.push(makeRules({ symbol: `${base}BTC`, baseAsset: base, quoteAsset: "BTC" }));
+		}
+		const { selected, capped } = selectUniverse(rules, { quoteAssets: ["USDT", "BTC"], maxSymbols: 20 });
+		expect(capped).toBe(true);
+		expect(selected.length).toBeGreaterThan(15);
+		const cycles = enumerateCycles(new MarketGraph(pruneDeadEnds(selected)), {
+			startAssets: ["USDT"],
+			maxLength: 3,
+		});
+		// The old orderings produced 0 here; whole-pair admission produces a full cycle table.
+		expect(cycles.length).toBeGreaterThanOrEqual(9);
+		// And no slot is wasted: every kept asset can be left again.
+		expect(pruneDeadEnds(selected)).toHaveLength(selected.length);
 	});
 
 	it("drops markets whose asset cannot be left except by reversing the same trade", () => {

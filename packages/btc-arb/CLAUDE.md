@@ -72,6 +72,16 @@ npx tsx src/cli.ts doctor  --config binance-us.config.json   # validates a real 
 so `run --live` can be rehearsed end to end. It is the only rehearsal available on a venue with no
 testnet.
 
+## Second adversarial review (2026-08-19)
+
+The ~15 commits added after the first review got the same treatment and it confirmed 9 findings,
+three serious: the widened freshness window was not threaded to the executor (planned thin-venue
+cycles became forced unwinds), the skew check cancelled the widened window for mixed cycles, and
+the connectivity-ranked universe cap could prune a two-quote venue to zero cycles. All fixed; the
+loopback exchange was also hardened where it was more permissive than real Binance. Lesson that
+keeps repeating: every feature added under time pressure needs the adversarial pass, because all
+three serious bugs were in code whose tests passed.
+
 ## Open item
 
 The operator was asked to run a 12-hour `scan` and report the `before fees` line. That result had

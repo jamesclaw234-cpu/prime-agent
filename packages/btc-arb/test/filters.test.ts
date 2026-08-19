@@ -12,8 +12,9 @@ import {
 	validateLimitOrder,
 } from "../src/binance/filters.js";
 import type { RawExchangeInfo, RawSymbol } from "../src/binance/types.js";
+import { doctorProbePrice } from "../src/cli.js";
 import { decToNumber, decToString, ZERO } from "../src/util/decimal.js";
-import { BTCUSDT, d } from "./fixtures.js";
+import { BTCUSDT, d, makeRules } from "./fixtures.js";
 
 /** Shaped exactly like a real `exchangeInfo` entry, including the filters we must honour. */
 function rawSymbol(overrides: Partial<RawSymbol> = {}): RawSymbol {
@@ -203,5 +204,41 @@ describe("maxCompliantQty", () => {
 
 	it("passes a compliant quantity through unchanged", () => {
 		expect(decToString(maxCompliantQty(BTCUSDT, d("100"), d("1.5")))).toBe("1.5");
+	});
+});
+
+describe("doctor probe price", () => {
+	/**
+	 * Regression: the probe priced at bid*0.7 unconditionally, and the universe ranking makes a
+	 * stablecoin bridge the LIKELY probe target. Real USDTUSD carries PRICE_FILTER minPrice 0.80
+	 * and PERCENT_PRICE_BY_SIDE bidMultiplierDown 0.8, so the unclamped probe drew -1013 from the
+	 * exchange and `doctor` reported FAIL on a perfectly healthy account and key.
+	 */
+	const stablePair = makeRules({
+		symbol: "USDTUSD",
+		baseAsset: "USDT",
+		quoteAsset: "USD",
+		tickSize: d("0.0001"),
+		minPrice: d("0.8"),
+		bidMultiplierDown: d("0.8"),
+		pricePrecision: 4,
+	});
+
+	it("clamps above a tight-band symbol's floors while staying below the touch", () => {
+		const bid = d("0.9996");
+		const price = doctorProbePrice(stablePair, bid);
+		// Above both floors, with the 2% margin over the percent band...
+		expect(decToNumber(price)).toBeGreaterThanOrEqual(0.8);
+		expect(decToNumber(price)).toBeGreaterThanOrEqual(0.9996 * 0.8 * 1.02);
+		// ...but still below the bid, so the probe cannot cross even if placed by mistake.
+		expect(decToNumber(price)).toBeLessThan(0.9996);
+		// And it passes the same validator the executor uses.
+		const check = validateLimitOrder(stablePair, "BUY", price, d("20"), bid);
+		expect(check.ok).toBe(true);
+	});
+
+	it("keeps the plain bid*0.7 for symbols with the default wide bands", () => {
+		const price = doctorProbePrice(BTCUSDT, d("100000"));
+		expect(decToNumber(price)).toBeCloseTo(70_000, 0);
 	});
 });

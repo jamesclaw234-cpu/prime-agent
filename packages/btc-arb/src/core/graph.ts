@@ -127,40 +127,60 @@ export function selectUniverse(
 		selected.push(rule);
 	}
 
-	// Ordered by how connected each market's assets are, then by symbol for determinism.
-	//
-	// The cap has to drop *something*, and alphabetical order made that choice arbitrary in a way
-	// that turned out to be actively harmful: on a USD/USDT venue the bridge markets are USDCUSD,
-	// USDCUSDT and USDTUSD, which sort to the very end of the alphabet and were the first to be
-	// cut. Those are the markets that make stablecoin cycles exist at all, so a binding cap deleted
-	// precisely the routes most worth watching and left a table of leaf pairs.
-	//
-	// Ranked by the *less* connected of a market's two assets, not by the sum. To sit on a cycle you
-	// must be able to leave whatever you arrive at, so an asset that appears in only one market is a
-	// dead end however famous its counterpart is. Summing would score every leaf pair quoted in USD
-	// as highly as the USD bridge itself, since both inherit the hub's degree.
-	const degree = new Map<Asset, number>();
-	for (const rule of selected) {
-		degree.set(rule.baseAsset, (degree.get(rule.baseAsset) ?? 0) + 1);
-		degree.set(rule.quoteAsset, (degree.get(rule.quoteAsset) ?? 0) + 1);
-	}
-	const score = (rule: SymbolRules): [number, number] => {
-		const base = degree.get(rule.baseAsset) ?? 0;
-		const quote = degree.get(rule.quoteAsset) ?? 0;
-		return [Math.min(base, quote), base + quote];
-	};
-	selected.sort((a, b) => {
-		const [aMin, aSum] = score(a);
-		const [bMin, bSum] = score(b);
-		return bMin - aMin || bSum - aSum || (a.symbol < b.symbol ? -1 : a.symbol > b.symbol ? 1 : 0);
-	});
+	// Deterministic ordering for the uncapped case and inside groups below.
+	selected.sort((a, b) => (a.symbol < b.symbol ? -1 : a.symbol > b.symbol ? 1 : 0));
 
 	const max = filter.maxSymbols ?? Number.POSITIVE_INFINITY;
-	if (selected.length > max) {
-		for (const rule of selected.slice(max)) rejected.set(rule.symbol, "over maxSymbols cap");
-		return { selected: selected.slice(0, max), rejected, capped: true };
+	if (selected.length <= max) return { selected, rejected, capped: false };
+
+	// The cap has to drop something, and two earlier orderings both failed at this in ways that
+	// only showed up against a real venue. Alphabetical truncation deleted USDCUSD/USDCUSDT/USDTUSD
+	// - the bridge markets that make stablecoin cycles exist - because they sort last. Per-market
+	// connectivity ranking then failed one step later: every dual-quoted asset's markets tie on the
+	// connectivity score, the tiebreak groups them BY QUOTE rather than by asset, and a cap landing
+	// inside a block keeps one leg of each asset's pair. A single kept leg makes its base asset
+	// degree-1, dead-end pruning deletes it, and the slot is wasted - in a two-quote universe that
+	// pruned the ENTIRE selection to zero cycles.
+	//
+	// The invariant a cap must preserve is therefore about ASSETS, not markets: keep either enough
+	// of an asset's markets to leave it again, or none of them. So markets between two quote assets
+	// (the hubs - few, and the reason cycles exist) are admitted first, and everything else is
+	// admitted as whole per-base-asset groups, first-fit by how many quotes the asset trades
+	// against. A group that does not fit is skipped in favour of smaller ones that do.
+	const quoteSet = new Set<Asset>();
+	for (const rule of selected) quoteSet.add(rule.quoteAsset);
+
+	const bridges: SymbolRules[] = [];
+	const groups = new Map<Asset, SymbolRules[]>();
+	for (const rule of selected) {
+		if (quoteSet.has(rule.baseAsset)) {
+			bridges.push(rule);
+		} else {
+			const group = groups.get(rule.baseAsset);
+			if (group) group.push(rule);
+			else groups.set(rule.baseAsset, [rule]);
+		}
 	}
-	return { selected, rejected, capped: false };
+
+	const kept: SymbolRules[] = bridges.slice(0, max);
+	const ranked = [...groups.values()].sort(
+		(a, b) => b.length - a.length || (a[0].baseAsset < b[0].baseAsset ? -1 : 1),
+	);
+	// Multi-market groups first: a single-market asset is a guaranteed dead end, so those fill any
+	// slots left over rather than displacing assets that can actually sit on a cycle.
+	for (const wave of [ranked.filter((g) => g.length > 1), ranked.filter((g) => g.length === 1)]) {
+		for (const group of wave) {
+			if (kept.length + group.length > max) continue;
+			kept.push(...group);
+		}
+	}
+
+	const keptSymbols = new Set(kept.map((rule) => rule.symbol));
+	for (const rule of selected) {
+		if (!keptSymbols.has(rule.symbol)) rejected.set(rule.symbol, "over maxSymbols cap");
+	}
+	kept.sort((a, b) => (a.symbol < b.symbol ? -1 : a.symbol > b.symbol ? 1 : 0));
+	return { selected: kept, rejected, capped: true };
 }
 
 /**

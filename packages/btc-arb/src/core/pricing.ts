@@ -128,7 +128,14 @@ export function quoteCycle(
 ): CycleQuote | undefined {
 	let multiple = 1;
 	let oldest = 0;
-	let newest = Number.POSITIVE_INFINITY;
+	// Skew is tracked only over ACTIVE legs - those within the base window. An active symbol's
+	// receivedAt tracks market time, so a wide spread between two active quotes really does mean
+	// the cycle was assembled from different moments. A thin symbol's receivedAt tracks nothing but
+	// its own last change; measuring it against an active leg's would reject every mixed cycle the
+	// widened window exists to admit, which is exactly what an earlier version of this check did.
+	// Thin legs are vouched for by their own cadence-derived window instead.
+	let activeOldest = 0;
+	let activeNewest = Number.POSITIVE_INFINITY;
 
 	for (const leg of cycle.legs) {
 		const book = store.get(leg.symbol);
@@ -136,15 +143,19 @@ export function quoteCycle(
 		const age = now - book.receivedAt;
 		if (age > store.ageLimitFor(leg.symbol, maxBookAgeMs, ageCeilingMs)) return undefined;
 		if (age > oldest) oldest = age;
-		if (age < newest) newest = age;
+		if (age <= maxBookAgeMs) {
+			if (age > activeOldest) activeOldest = age;
+			if (age < activeNewest) activeNewest = age;
+		}
 		multiple *= edgeRateNum(book, leg.side, fee.takerMultiplierNum);
 	}
 
-	// Every leg being individually fresh does not make the cycle coherent. A loop priced from a
-	// 10ms-old quote and a 4s-old one describes a market that never existed at any single instant,
-	// and the apparent edge is usually just the newer leg having moved. Age alone cannot catch it:
-	// both quotes pass any window wide enough to admit the older one.
-	if (maxSkewMs > 0 && oldest - newest > maxSkewMs) return undefined;
+	// Two active quotes far apart in receivedAt describe a market that existed at no single
+	// instant, and the apparent edge is usually just the newer leg having moved. Age alone cannot
+	// catch it: both quotes pass any window wide enough to admit the older one.
+	if (maxSkewMs > 0 && activeNewest < Number.POSITIVE_INFINITY && activeOldest - activeNewest > maxSkewMs) {
+		return undefined;
+	}
 
 	return {
 		cycle,

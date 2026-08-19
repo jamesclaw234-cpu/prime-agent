@@ -187,14 +187,17 @@ export class BinanceRestClient {
 		const timeout = AbortSignal.timeout(options.timeoutMs ?? this.options.timeoutMs);
 		const signal = options.signal ? AbortSignal.any([timeout, options.signal]) : timeout;
 
+		const budgetsAll: Record<string, number> = { ...budgets, [RAW_REQUESTS]: 1 };
 		try {
-			await this.options.limiter.acquire({ ...budgets, [RAW_REQUESTS]: 1 }, signal);
+			await this.options.limiter.acquire(budgetsAll, signal);
 		} catch (error) {
 			// Name the budget that ran out. "Rate limited" on its own sends an operator hunting
 			// through four windows and a penalty timer to find which one, and the answer changes what
-			// they should do about it.
+			// they should do about it. Filtered on the full set actually acquired - RAW_REQUESTS is
+			// consumed by every request, and the original filter used the caller's budgets and so
+			// could never name the one window every request depends on.
 			const usage = Object.entries(this.options.limiter.snapshot())
-				.filter(([name]) => (budgets[name] ?? 0) > 0)
+				.filter(([name]) => (budgetsAll[name] ?? 0) > 0)
 				.map(([name, window]) => `${name} ${window.used}/${window.limit}`)
 				.join(", ");
 			const penalty = this.options.limiter.penaltyRemainingMs;

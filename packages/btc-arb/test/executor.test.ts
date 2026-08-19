@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { BinanceApiError } from "../src/binance/rest-client.js";
 import { BINANCE_ERROR, EXPIRY_REASON } from "../src/binance/types.js";
+import { BookStore, makeBook } from "../src/core/book.js";
 import { planOpportunity } from "../src/core/sizing.js";
 import { type ExecutionEngine, NOT_PLACED, type OrderOutcome, type OrderRequest } from "../src/exec/engine.js";
 import { CycleExecutor, reverseLeg } from "../src/exec/executor.js";
@@ -602,5 +603,126 @@ describe("expiry reasons", () => {
 		const engine = new ScriptedEngine([fullFill, fullFill, fullFill]);
 		const result = await makeExecutor(engine).execute(buildOpportunity());
 		expect(result.fills[0].expiryReason).toBeUndefined();
+	});
+});
+
+describe("freshness window parity with the detector", () => {
+	/**
+	 * Regression: the executor kept the strict base window while the detector planned with the
+	 * widened per-symbol one, so the detector deliberately admitted thin-venue cycles whose later
+	 * legs the executor was guaranteed to refuse. A leg-2 refusal lands after leg 1 has committed
+	 * funds - a forced unwind that pays fees and spread twice for a planned trade that could never
+	 * complete. The strictness fired exactly one leg too late to protect anything.
+	 */
+	function thinStore(): BookStore {
+		const store = new BookStore(() => NOW);
+		let updateId = 1;
+		for (const [symbol, quote] of Object.entries(PROFITABLE)) {
+			// ETHBTC is a thin market: two updates ~20s apart seed its cadence, and its latest quote
+			// is 5s old. The active legs are milliseconds old.
+			const age = symbol === "ETHBTC" ? 5000 : 20;
+			store.apply(
+				makeBook(
+					symbol,
+					d(quote.bid),
+					d(quote.bidQty),
+					d(quote.ask),
+					d(quote.askQty),
+					updateId++,
+					NOW - age - 20_000,
+				),
+			);
+			store.apply(
+				makeBook(symbol, d(quote.bid), d(quote.bidQty), d(quote.ask), d(quote.askQty), updateId++, NOW - age),
+			);
+		}
+		return store;
+	}
+
+	function opportunityFrom(store: BookStore): Opportunity {
+		const result = planOpportunity({
+			cycle: TRIANGLE,
+			store,
+			rules: RULES,
+			fee: FEE_10BPS,
+			depthUtilization: 1,
+			aggressionTicks: 0,
+			maxInput: d("100"),
+			minInput: d("10"),
+			minNetEdgeBps: 8,
+			requireNonNegativeWorstCase: true,
+			now: NOW,
+			maxBookAgeMs: 1500,
+			maxBookAgeCeilingMs: 30_000,
+			maxQuoteSkewMs: 1500,
+		});
+		if (!result.ok) throw new Error(`fixture is not tradable: ${result.reason}`);
+		return result.opportunity;
+	}
+
+	it("executes the thin leg the detector planned instead of refusing it and unwinding", async () => {
+		const store = thinStore();
+		const opportunity = opportunityFrom(store);
+		const engine = new ScriptedEngine([fullFill, fullFill, fullFill]);
+		const executor = new CycleExecutor({
+			engine,
+			store,
+			rules: RULES,
+			fee: FEE_10BPS,
+			cycleDeadlineMs: 3000,
+			aggressionTicks: 0,
+			unwind: UNWIND,
+			maxBookAgeMs: 1500,
+			maxBookAgeCeilingMs: 30_000,
+			now: () => NOW,
+		});
+		const result = await executor.execute(opportunity);
+		expect(result.outcome).toBe("completed");
+		expect(result.fills).toHaveLength(3);
+		expect(result.unwindFills).toHaveLength(0);
+	});
+
+	it("demonstrates the forced unwind the old strict window caused", async () => {
+		// Same plan, but an executor still on the strict-only window: leg 1 fills, leg 2's 5s-old
+		// book is refused, and the cycle unwinds leg 1 for nothing. This is the money-losing shape
+		// the parity fix removes.
+		const store = thinStore();
+		const opportunity = opportunityFrom(store);
+		const engine = new ScriptedEngine([fullFill, fullFill, fullFill]);
+		const executor = new CycleExecutor({
+			engine,
+			store,
+			rules: RULES,
+			fee: FEE_10BPS,
+			cycleDeadlineMs: 3000,
+			aggressionTicks: 0,
+			unwind: UNWIND,
+			maxBookAgeMs: 1500,
+			now: () => NOW,
+		});
+		const result = await executor.execute(opportunity);
+		expect(result.outcome).not.toBe("completed");
+		expect(result.unwindFills.length).toBeGreaterThan(0);
+		expect(decToNumber(result.realizedPnl)).toBeLessThan(0);
+	});
+});
+
+describe("dust on the main unwind path", () => {
+	/**
+	 * Regression: unwind() classified a below-minimum leftover as dust, but only the residual
+	 * retrace consumed the flag. The main path (failed later leg) reported the identical unsellable
+	 * sliver as stranded inventory, and haltOnStranded then stopped the whole bot over an amount no
+	 * order can sell and no operator can reconcile.
+	 */
+	it("classifies an unsellable sliver from a failed later leg as dust, not stranded", async () => {
+		// Leg 2 fills one lot step (0.0001 ETH ~ 0.00001 BTC of spend), leg 3 never fills. The tiny
+		// ETH holding is below ETHUSDT's minNotional, and the unwind correctly refuses to sell it.
+		const engine = new ScriptedEngine([fullFill, partialFill("0.0001"), noFill]);
+		const result = await makeExecutor(engine).execute(buildOpportunity());
+		// The outcome keeps the abort CAUSE (an earlier fix made sure of that); the structured
+		// stranded signal is what must not fire, because haltOnStranded stops the whole bot on it.
+		expect(result.strandedAsset).toBeUndefined();
+		expect(result.strandedAmount).toBeUndefined();
+		expect(result.outcome).not.toBe("stranded");
 	});
 });

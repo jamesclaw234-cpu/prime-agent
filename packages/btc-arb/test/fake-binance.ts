@@ -9,10 +9,12 @@ import {
 	decFromString,
 	decGte,
 	decIsPositive,
+	decLt,
 	decLte,
 	decMin,
 	decMul,
 	decSub,
+	decToFixed,
 	decToString,
 	ZERO,
 } from "../src/util/decimal.js";
@@ -333,7 +335,21 @@ export class FakeBinance {
 					break;
 				}
 				case "POST /api/v3/order/test": {
-					if (this.authorize(req, rawQuery, res)) this.ok(res, {});
+					if (!this.authorize(req, rawQuery, res)) break;
+					// Real order/test runs every symbol filter; answering {} unconditionally would let
+					// doctor's probe pass here while real Binance rejects it with -1013.
+					const testSpec = SYMBOLS.find((sym) => sym.symbol === (params.get("symbol") ?? ""));
+					if (!testSpec) {
+						this.fail(res, 400, -1121, "Invalid symbol.");
+						break;
+					}
+					const bad = this.violatedFilter(
+						testSpec,
+						decFromString(params.get("price") ?? "0"),
+						decFromString(params.get("quantity") ?? "0"),
+					);
+					if (bad) this.fail(res, 400, -1013, `Filter failure: ${bad}`);
+					else this.ok(res, {});
 					break;
 				}
 				case "GET /api/v3/order": {
@@ -387,12 +403,34 @@ export class FakeBinance {
 		const params = new URLSearchParams(payload);
 		const timestamp = Number(params.get("timestamp"));
 		const recvWindow = Number(params.get("recvWindow") ?? 5000);
+		if (recvWindow > 60_000) {
+			this.fail(res, 400, -1131, "recvWindow must be less than 60000");
+			return false;
+		}
 		const now = Date.now();
 		if (!Number.isFinite(timestamp) || timestamp > now + 1000 || now - timestamp > recvWindow) {
 			this.fail(res, 400, -1021, "Timestamp for this request is outside of the recvWindow.");
 			return false;
 		}
 		return true;
+	}
+
+	/**
+	 * The filters Binance enforces on every order, enforced here too.
+	 *
+	 * The fake advertised PRICE_FILTER/LOT_SIZE/NOTIONAL in exchangeInfo and then checked none of
+	 * them, which broke its whole contract: the bot's own validateLimitOrder is exactly the code
+	 * under test, so if the fake fills whatever that code emits, a rounding regression sails
+	 * through the suite and first fails live as -1013 on leg 2 or 3 with inventory already held.
+	 * Returns the failing filter's name, or undefined when the order is clean.
+	 */
+	private violatedFilter(spec: SymbolSpec, price: Dec, quantity: Dec): string | undefined {
+		const tick = decFromString(spec.tick);
+		const step = decFromString(spec.step);
+		if (!decIsPositive(price) || price % tick !== 0n) return "PRICE_FILTER";
+		if (!decIsPositive(quantity) || quantity % step !== 0n) return "LOT_SIZE";
+		if (decLt(decMul(price, quantity), decFromString(spec.minNotional))) return "NOTIONAL";
+		return undefined;
 	}
 
 	private placeOrder(params: URLSearchParams, res: ServerResponse): void {
@@ -442,9 +480,29 @@ export class FakeBinance {
 			return;
 		}
 
-		const quote = this.quotes.get(symbol);
 		const limit = decFromString(price);
 		const wanted = decFromString(quantity);
+
+		const violated = this.violatedFilter(spec, limit, wanted);
+		if (violated) {
+			record("REJECTED", "0");
+			this.fail(res, 400, -1013, `Filter failure: ${violated}`);
+			return;
+		}
+
+		// Binance locks limit * origQty for a BUY (and origQty for a SELL) AT PLACEMENT, and answers
+		// -2010 even when an IOC would not match at all. Checking fill-price * filled-qty instead -
+		// as this fake originally did - is weaker on both axes and let an over-limit sizing bug fill
+		// here while real Binance would refuse the whole order upfront.
+		const required = side === "BUY" ? decMul(limit, wanted) : wanted;
+		const requiredAsset = side === "BUY" ? spec.quote : spec.base;
+		if (!decGte(this.balanceOf(requiredAsset), required)) {
+			record("REJECTED", "0");
+			this.fail(res, 400, -2010, "Account has insufficient balance for requested action.");
+			return;
+		}
+
+		const quote = this.quotes.get(symbol);
 		let filled = ZERO;
 		let fillPrice = ZERO;
 		if (quote) {
@@ -460,11 +518,6 @@ export class FakeBinance {
 		const quoteQty = decMul(filled, fillPrice);
 		const spend = side === "BUY" ? quoteQty : filled;
 		const spendAsset = side === "BUY" ? spec.quote : spec.base;
-		if (decIsPositive(filled) && !decGte(this.balanceOf(spendAsset), spend)) {
-			record("REJECTED", "0");
-			this.fail(res, 400, -2010, "Account has insufficient balance for requested action.");
-			return;
-		}
 
 		const fills: { price: string; qty: string; commission: string; commissionAsset: string }[] = [];
 		if (decIsPositive(filled)) {
@@ -525,9 +578,38 @@ export class FakeBinance {
 		});
 	}
 
+	/**
+	 * Looks an order up the way Binance does: scoped to (symbol, id), with symbol mandatory.
+	 *
+	 * This endpoint is the sole basis for the halt/continue decision after an ambiguous order
+	 * failure - the resolver treats "does not exist" as proof the order never reached the book. A
+	 * fake that finds orders by client id alone would keep that test green even if the bot ever
+	 * reconciled with the wrong symbol, while real Binance would answer -2013 and the bot would
+	 * carry on trading past a filled, unaccounted order.
+	 */
+	private findOrder(params: URLSearchParams, res: ServerResponse): StoredOrder | undefined {
+		const symbol = params.get("symbol");
+		if (!symbol) {
+			this.fail(res, 400, -1102, "Mandatory parameter 'symbol' was not sent.");
+			return undefined;
+		}
+		const clientOrderId = params.get("origClientOrderId");
+		const orderId = params.get("orderId");
+		if (!clientOrderId && !orderId) {
+			this.fail(res, 400, -1102, "Param 'origClientOrderId' or 'orderId' must be sent.");
+			return undefined;
+		}
+		for (const order of this.orders.values()) {
+			if (order.symbol !== symbol) continue;
+			if (clientOrderId && order.clientOrderId === clientOrderId) return order;
+			if (orderId && String(order.orderId) === orderId) return order;
+		}
+		return undefined;
+	}
+
 	private queryOrder(params: URLSearchParams, res: ServerResponse): void {
-		const clientOrderId = params.get("origClientOrderId") ?? "";
-		const order = this.orders.get(clientOrderId);
+		const order = this.findOrder(params, res);
+		if (res.writableEnded) return;
 		if (!order) {
 			this.fail(res, 400, -2013, "Order does not exist.");
 			return;
@@ -536,8 +618,8 @@ export class FakeBinance {
 	}
 
 	private cancelOrder(params: URLSearchParams, res: ServerResponse): void {
-		const clientOrderId = params.get("origClientOrderId") ?? "";
-		const order = this.orders.get(clientOrderId);
+		const order = this.findOrder(params, res);
+		if (res.writableEnded) return;
 		if (!order) {
 			this.fail(res, 400, -2011, "Unknown order sent.");
 			return;
@@ -563,6 +645,9 @@ export class FakeBinance {
 	}
 
 	private account(): unknown {
+		// Derived from the configured takerBps rather than hardcoded: a test that configures a 2bps
+		// venue and reads back 10bps would silently price every cycle against the wrong fee.
+		const rate = decToFixed(this.takerFee, 8);
 		return {
 			makerCommission: 10,
 			takerCommission: 10,
@@ -570,7 +655,7 @@ export class FakeBinance {
 			canWithdraw: false,
 			canDeposit: true,
 			accountType: "SPOT",
-			commissionRates: { maker: "0.00100000", taker: "0.00100000", buyer: "0.00000000", seller: "0.00000000" },
+			commissionRates: { maker: rate, taker: rate, buyer: "0.00000000", seller: "0.00000000" },
 			permissions: ["SPOT"],
 			updateTime: Date.now(),
 			balances: [...this.balances].map(([asset, free]) => ({ asset, free: decToString(free), locked: "0" })),
@@ -578,9 +663,10 @@ export class FakeBinance {
 	}
 
 	private commission(symbol: string): unknown {
+		const rate = decToFixed(this.takerFee, 8);
 		return {
 			symbol,
-			standardCommission: { maker: "0.00100000", taker: "0.00100000", buyer: "0.00000000", seller: "0.00000000" },
+			standardCommission: { maker: rate, taker: rate, buyer: "0.00000000", seller: "0.00000000" },
 			taxCommission: { maker: "0.00000000", taker: "0.00000000", buyer: "0.00000000", seller: "0.00000000" },
 			discount: { enabledForAccount: false, enabledForSymbol: false, discountAsset: "BNB", discount: "0.75000000" },
 		};

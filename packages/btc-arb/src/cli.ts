@@ -2,7 +2,15 @@
 import { createReadStream, realpathSync } from "node:fs";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
-import { formatPrice, formatQty, maxCompliantQty, parseExchangeInfo, roundPriceDown } from "./binance/filters.js";
+import {
+	formatPrice,
+	formatQty,
+	maxCompliantQty,
+	parseExchangeInfo,
+	roundPriceDown,
+	roundPriceUp,
+	validateLimitOrder,
+} from "./binance/filters.js";
 import { DEFAULT_LIMITS, RateLimiter } from "./binance/rate-limiter.js";
 import { BinanceRestClient } from "./binance/rest-client.js";
 import {
@@ -31,6 +39,8 @@ import {
 	decFromNumber,
 	decFromString,
 	decIsPositive,
+	decLt,
+	decMax,
 	decMul,
 	decToNumber,
 } from "./util/decimal.js";
@@ -208,7 +218,7 @@ async function commandRun(args: ParsedArgs, scanOnly: boolean): Promise<number> 
 		logger.info("shutting down", { signal });
 		await bot.stop();
 		dashboard?.stop();
-		printSummary(bot);
+		printSummary(bot, config.detection.maxCycleLength);
 	};
 
 	process.on("SIGINT", () => void shutdown("SIGINT"));
@@ -239,7 +249,7 @@ async function commandRun(args: ParsedArgs, scanOnly: boolean): Promise<number> 
 	return 0;
 }
 
-function printSummary(bot: ArbBot): void {
+function printSummary(bot: ArbBot, maxCycleLength: number): void {
 	const status = bot.status();
 	const summary = status.ledger;
 	const lines = [
@@ -254,7 +264,7 @@ function printSummary(bot: ArbBot): void {
 		"",
 	];
 	process.stdout.write(`${lines.join("\n")}\n`);
-	writeEdgeReport(status.detector, status.takerBps);
+	writeEdgeReport(status.detector, status.takerBps, maxCycleLength);
 }
 
 /**
@@ -265,7 +275,7 @@ function printSummary(bot: ArbBot): void {
  * from "edges peaked at -40bps, so nothing will". Those imply opposite decisions, so the
  * distribution is printed rather than only the threshold crossings.
  */
-function writeEdgeReport(detector: BotStatus["detector"], takerBps: number): void {
+function writeEdgeReport(detector: BotStatus["detector"], takerBps: number, legCount: number): void {
 	const out = process.stdout;
 	const priced = detector.quotesPriced;
 	if (priced === 0) {
@@ -292,7 +302,7 @@ function writeEdgeReport(detector: BotStatus["detector"], takerBps: number): voi
 	// The fee is a constant, so stripping it back out separates a market that is mispriced but
 	// expensive to trade from one that is simply not mispriced. Only the first is worth chasing.
 	if (detector.bestEdgeBps !== undefined) {
-		const gross = detector.bestEdgeBps + takerBps * 3;
+		const gross = detector.bestEdgeBps + takerBps * legCount;
 		out.write(
 			`  before fees      ${gross.toFixed(2)}bps` +
 				`  (${gross > 0 ? "mispriced, but the fee is the obstacle" : "not mispriced: the spreads alone lose money"})\n`,
@@ -458,6 +468,25 @@ export function expectedDust(
 	return total;
 }
 
+/**
+ * A safe price for the doctor's BUY probe: below the touch, above every floor the exchange checks.
+ *
+ * bid*0.7 alone is NOT safe. Stablecoin markets carry tight bands - real USDTUSD has PRICE_FILTER
+ * minPrice 0.80 and PERCENT_PRICE_BY_SIDE bidMultiplierDown 0.8 - and the universe ranking makes a
+ * stable pair the LIKELY probe target, so an unclamped probe made `doctor` FAIL with -1013 on a
+ * perfectly healthy account. The clamp sits 2% above the percent-band floor because the exchange
+ * evaluates that band against a weighted average price, not the bid we can see.
+ */
+export function doctorProbePrice(rules: SymbolRules, bid: Dec): Dec {
+	const raw = decMul(bid, decFromString("0.7"));
+	const bandFloor = decMul(decMul(bid, rules.bidMultiplierDown), decFromString("1.02"));
+	const floor = decMax(rules.minPrice, bandFloor);
+	const clamped = roundPriceUp(rules, decMax(raw, floor));
+	// A BUY at the bid still cannot cross (the ask is always above it), so the bid caps the probe
+	// when a symbol's floors leave no room below the touch.
+	return decLt(clamped, bid) ? clamped : roundPriceDown(rules, bid);
+}
+
 /** Read-only preflight. Places no orders and needs no credentials for the public checks. */
 async function commandDoctor(args: ParsedArgs): Promise<number> {
 	const config = buildConfig(args);
@@ -525,9 +554,7 @@ async function commandDoctor(args: ParsedArgs): Promise<number> {
 			const book = (await client.bookTickers()).find((ticker) => ticker.symbol === target.symbol);
 			if (!book) throw new Error(`no book for ${target.symbol}`);
 
-			// Deliberately far below the touch: a BUY that cannot cross is still validated against
-			// every filter, and cannot fill even if something later placed it by mistake.
-			const price = roundPriceDown(target, decMul(decFromString(book.bidPrice), decFromString("0.7")));
+			const price = doctorProbePrice(target, decFromString(book.bidPrice));
 			// `minNotionalPerCycle` is money, not quantity: a real leg-1 order is the smallest the
 			// bot would ever send, which is the interesting case for a minimum-notional filter.
 			const notional = decFromNumber(config.execution.minNotionalPerCycle);
@@ -540,6 +567,12 @@ async function commandDoctor(args: ParsedArgs): Promise<number> {
 					`execution.minNotionalPerCycle (${config.execution.minNotionalPerCycle}) is below ${target.symbol}'s own minimum of ${decToNumber(target.minNotional)}`,
 				);
 			}
+
+			// Pre-checked with the same validator the executor uses: if the probe itself is malformed
+			// that is OUR bug, and it must not be reported as an account or exchange failure.
+			const local = validateLimitOrder(target, "BUY", price, quantity, decFromString(book.bidPrice));
+			if (!local.ok)
+				throw new Error(`probe failed local validation before sending: ${local.filter} ${local.detail}`);
 
 			await client.testOrder({
 				symbol: target.symbol,
@@ -614,6 +647,11 @@ async function commandReplay(args: ParsedArgs): Promise<number> {
 		minNetEdgeBps: config.detection.minNetEdgeBps,
 		screenMarginBps: config.detection.screenMarginBps,
 		maxBookAgeMs: config.detection.maxBookAgeMs,
+		// Replay's whole claim is "the same code path a live run uses" - omitting these two silently
+		// re-enabled the single global window and disabled the skew check, so an operator re-running
+		// a recording to evaluate either knob saw no effect at all.
+		maxBookAgeCeilingMs: config.detection.maxBookAgeCeilingMs,
+		maxQuoteSkewMs: config.detection.maxQuoteSkewMs,
 		depthUtilization: config.execution.depthUtilization,
 		aggressionTicks: config.execution.aggressionTicks,
 		requireNonNegativeWorstCase: config.execution.requireNonNegativeWorstCase,

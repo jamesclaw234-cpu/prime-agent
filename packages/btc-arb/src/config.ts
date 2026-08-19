@@ -477,11 +477,11 @@ export function validateConfig(config: ArbConfig): void {
 	}
 	requireNonNegative(config.detection.minNetEdgeBps, "detection.minNetEdgeBps");
 	requirePositive(config.detection.maxBookAgeMs, "detection.maxBookAgeMs");
-	if (config.detection.maxBookAgeCeilingMs < 0) {
-		throw new ConfigError("detection.maxBookAgeCeilingMs must not be negative");
+	if (!Number.isFinite(config.detection.maxBookAgeCeilingMs) || config.detection.maxBookAgeCeilingMs < 0) {
+		throw new ConfigError("detection.maxBookAgeCeilingMs must be a non-negative number");
 	}
-	if (config.detection.maxQuoteSkewMs < 0) {
-		throw new ConfigError("detection.maxQuoteSkewMs must not be negative");
+	if (!Number.isFinite(config.detection.maxQuoteSkewMs) || config.detection.maxQuoteSkewMs < 0) {
+		throw new ConfigError("detection.maxQuoteSkewMs must be a non-negative number");
 	}
 	requireNonNegative(config.detection.screenMarginBps, "detection.screenMarginBps");
 	if (config.detection.screenMarginBps > config.detection.minNetEdgeBps) {

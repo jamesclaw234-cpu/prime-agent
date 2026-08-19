@@ -299,3 +299,64 @@ describe("quote skew", () => {
 		expect(quoteCycle(TRIANGLE, store, FEE_10BPS, now, 5000, 0, 0)).toBeDefined();
 	});
 });
+
+describe("skew and the widened window together", () => {
+	/**
+	 * Regression: the skew check used to measure receivedAt spread across ALL legs, which cancelled
+	 * the adaptive window for any cycle mixing an active leg with a thin one - i.e. almost every
+	 * cycle the widening exists to admit. A thin symbol's receivedAt tracks nothing but its own last
+	 * change, so comparing it against an active leg's timestamp measures thinness, not incoherence.
+	 * Skew now applies only among legs inside the base window, whose timestamps do track market time.
+	 */
+	const now = 1_000_000;
+
+	function seeded(ages: Record<string, { age: number; cadence?: number }>): BookStore {
+		const store = new BookStore(() => now);
+		let updateId = 1;
+		for (const [symbol, spec] of Object.entries(ages)) {
+			const quote = PROFITABLE[symbol];
+			if (spec.cadence) {
+				// Two updates one cadence apart seed the EWMA.
+				store.apply(
+					makeBook(
+						symbol,
+						d(quote.bid),
+						d(quote.bidQty),
+						d(quote.ask),
+						d(quote.askQty),
+						updateId++,
+						now - spec.age - spec.cadence,
+					),
+				);
+			}
+			store.apply(
+				makeBook(symbol, d(quote.bid), d(quote.bidQty), d(quote.ask), d(quote.askQty), updateId++, now - spec.age),
+			);
+		}
+		return store;
+	}
+
+	it("exempts a thin leg admitted by its own cadence window from the skew check", () => {
+		// ETHBTC ticks every ~20s; its 5s-old quote is current by that market's standards. The other
+		// legs are milliseconds old. Base 1500, ceiling 30s, skew 1500.
+		const store = seeded({
+			BTCUSDT: { age: 10 },
+			ETHBTC: { age: 5000, cadence: 20_000 },
+			ETHUSDT: { age: 20 },
+		});
+		const quote = quoteCycle(TRIANGLE, store, FEE_10BPS, now, 1500, 30_000, 1500);
+		expect(quote).toBeDefined();
+		expect(quote?.edgeBps).toBeGreaterThan(0);
+	});
+
+	it("still rejects incoherence among ACTIVE legs under a wide base window", () => {
+		// A 5s-old quote on a fast market inside a 6s base window is genuinely suspect, and the
+		// widened window cannot vouch for it - its own cadence is milliseconds.
+		const store = seeded({
+			BTCUSDT: { age: 10, cadence: 50 },
+			ETHBTC: { age: 5000, cadence: 50 },
+			ETHUSDT: { age: 20, cadence: 50 },
+		});
+		expect(quoteCycle(TRIANGLE, store, FEE_10BPS, now, 6000, 30_000, 1500)).toBeUndefined();
+	});
+});

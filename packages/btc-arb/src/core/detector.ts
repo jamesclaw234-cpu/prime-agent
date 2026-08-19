@@ -210,6 +210,10 @@ export class Detector {
 			this.bestEdgeAt = this.now();
 		}
 		const previous = this.bestByCycle.get(cycle.id);
+		// The table's cycle ids are enumerated once at startup, but the Bellman-Ford sweep
+		// synthesizes ids for 4-leg loops it discovers, and over a 24/7 run those accumulate. New
+		// ids stop being admitted at the cap; existing entries keep updating.
+		if (previous === undefined && this.bestByCycle.size >= 512) return;
 		if (previous === undefined || edgeBps > previous) this.bestByCycle.set(cycle.id, edgeBps);
 
 		let band = EDGE_BANDS.length;

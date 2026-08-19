@@ -347,6 +347,7 @@ export class ArbBot {
 			aggressionTicks: this.config.execution.aggressionTicks,
 			unwind: this.config.execution.unwind,
 			maxBookAgeMs: this.config.detection.maxBookAgeMs,
+			maxBookAgeCeilingMs: this.config.detection.maxBookAgeCeilingMs,
 			logger: this.logger,
 			now: this.now,
 		});

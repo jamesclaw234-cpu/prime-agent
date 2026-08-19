@@ -17,6 +17,18 @@ export interface ExecutorOptions {
 	readonly aggressionTicks: number;
 	readonly unwind: UnwindConfig;
 	readonly maxBookAgeMs: number;
+	/**
+	 * Upper bound for the per-symbol freshness window, matching the detector's.
+	 *
+	 * This MUST be the same window the detector plans with. An earlier version kept the executor
+	 * on the strict base window "to be safe", which meant the detector deliberately planned
+	 * thin-venue cycles whose later legs the executor was guaranteed to refuse - and a refusal on
+	 * leg 2 or 3 lands after leg 1 has committed funds, forcing an unwind that pays fees and
+	 * spread twice for nothing. The strictness fired exactly one leg too late to protect anything.
+	 * The IOC limit price is what actually bounds a moved book: if the quote is gone, the order
+	 * simply does not fill.
+	 */
+	readonly maxBookAgeCeilingMs?: number;
 	readonly logger?: Logger;
 	readonly now?: () => number;
 	/** Called immediately before every outbound order, including unwind retries. */
@@ -152,17 +164,27 @@ export class CycleExecutor {
 		// Unwinding after an ambiguous failure would trade against a position we cannot confirm.
 		// Freezing and handing it to the operator is the only safe response.
 		const canUnwind = this.options.unwind.enabled && !needsReconciliation;
+		// Retrace each partial-fill residual back to the start asset. Each one sits in the input
+		// asset of the leg that under-consumed it, so the path back is that leg's predecessors.
+		let recoveredResidual = ZERO;
+		const dust = new Map<string, Dec>();
+		// A leftover too small to form a legal order is dust wherever it arises. The residual path
+		// below has always classified it that way; the MAIN unwind path used to ignore the flag, so
+		// the identical unsellable sliver reached via a failed later leg was reported as stranded
+		// inventory and - with haltOnStranded on - stopped the whole bot over an amount that no
+		// order can sell and no operator can reconcile.
+		let mainPathDust = false;
 		if (!completedAllLegs && executedLegs > 0 && canUnwind) {
 			const result = await this.unwind(legs, executedLegs, heldAsset, heldAmount, unwindFills, signal);
 			heldAsset = result.asset;
 			heldAmount = result.amount;
 			if (result.ambiguous) needsReconciliation = true;
+			if (result.dust && result.asset !== startAsset && decIsPositive(result.amount)) {
+				dust.set(result.asset, decAdd(dust.get(result.asset) ?? ZERO, result.amount));
+				mainPathDust = true;
+			}
 		}
 
-		// Retrace each partial-fill residual back to the start asset. Each one sits in the input
-		// asset of the leg that under-consumed it, so the path back is that leg's predecessors.
-		let recoveredResidual = ZERO;
-		const dust = new Map<string, Dec>();
 		if (canUnwind && !needsReconciliation) {
 			for (const residual of residuals) {
 				const result = await this.unwind(
@@ -203,7 +225,10 @@ export class CycleExecutor {
 		// spend, so counting it when leg 1 never filled would book a phantom profit.
 		const recovered =
 			executedLegs > 0 && heldAsset === startAsset ? ((heldAmount + recoveredResidual) as Dec) : recoveredResidual;
-		const strandedAsset = executedLegs > 0 && heldAsset !== startAsset ? heldAsset : undefined;
+		// Dust is not stranded: stranded means "a position is sitting there that should be flattened",
+		// and a below-minimum sliver cannot be flattened by anyone. It is already recorded in the
+		// dust map and excluded from the recovered amount, which understates PnL - the safe side.
+		const strandedAsset = executedLegs > 0 && heldAsset !== startAsset && !mainPathDust ? heldAsset : undefined;
 
 		if (completedAllLegs) {
 			outcome = "completed";
@@ -271,7 +296,12 @@ export class CycleExecutor {
 		if (!rules) return undefined;
 		const book = this.options.store.get(leg.symbol);
 		if (!book) return undefined;
-		if (this.now() - book.receivedAt > this.options.maxBookAgeMs) return undefined;
+		const ageLimit = this.options.store.ageLimitFor(
+			leg.symbol,
+			this.options.maxBookAgeMs,
+			this.options.maxBookAgeCeilingMs ?? 0,
+		);
+		if (this.now() - book.receivedAt > ageLimit) return undefined;
 
 		const raw = aggressivePrice(book, leg, rules.tickSize, this.options.aggressionTicks);
 		const price = leg.side === "BUY" ? roundPriceUp(rules, raw) : roundPriceDown(rules, raw);
