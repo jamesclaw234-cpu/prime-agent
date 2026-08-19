@@ -512,6 +512,10 @@ export class ArbBot {
 	 */
 	private sweep(): void {
 		if (!this.graph || !this.detector) return;
+		// The sweep deliberately uses the strict base window: it is a discovery pass, and anything
+		// it finds is re-priced by evaluateDirect under the full per-symbol windows before any
+		// order. Widening here would only add candidates the re-check accepts anyway; the cost of
+		// the strict window is missed discovery on thin books, never an execution mismatch.
 		const found = findNegativeCycles(this.graph, this.store, this.fee, {
 			now: this.now(),
 			maxBookAgeMs: this.config.detection.maxBookAgeMs,

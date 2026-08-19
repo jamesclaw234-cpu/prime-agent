@@ -27,9 +27,16 @@ import {
  * and RFC 6455 framing. Both are places where a bug is invisible until the first live order.
  *
  * So this is deliberately a *checking* fake, not a permissive one. It verifies the HMAC over the
- * exact bytes it received, enforces `recvWindow`, keeps real balances, and refuses anything the
- * exchange would refuse. A test passing against it means the request would have been accepted by
- * Binance - not merely that our own parser was happy with our own output.
+ * exact bytes it received, enforces `recvWindow`, PRICE_FILTER, LOT_SIZE and NOTIONAL, applies the
+ * placement-time funds check against limit x origQty, scopes order lookup to the mandatory symbol,
+ * keeps real balances, and refuses anything the exchange would refuse. A test passing against it
+ * means the request would have been accepted by Binance - not merely that our own parser was happy
+ * with our own output.
+ *
+ * Known gaps, chosen rather than accidental: rate limits are advertised but never enforced (no
+ * -1015/429/418 path), Binance.US's parameter strictness is modelled only on GET /api/v3/account
+ * (the one endpoint it is proven on), PERCENT_PRICE_BY_SIDE is neither advertised nor enforced,
+ * and the WS server sends only whole unfragmented frames. Tests must not claim coverage of those.
  */
 
 export interface FakeQuote {

@@ -48,6 +48,7 @@ export interface DetectorStats {
 	readonly cyclesScreened: number;
 	/** Evaluations that produced a price. The rest hit a stale or missing book and told us nothing. */
 	readonly quotesPriced: number;
+	/** Evaluations that produced no price: a missing book, a book past its window, or active-leg skew. */
 	readonly staleSkips: number;
 	readonly screenPasses: number;
 	readonly planned: number;
