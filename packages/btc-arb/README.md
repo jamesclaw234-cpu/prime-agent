@@ -219,7 +219,7 @@ promised. It is the direct measure of how much of your detected edge survives ex
 npx vitest --run
 ```
 
-299 tests, all offline and deterministic — no network, no API keys, no paid calls. Coverage
+324 tests, all offline and deterministic — no network, no API keys, no paid calls. Coverage
 includes the exact-decimal money math, filter parsing and rounding, fee arithmetic (float screen
 checked against exact arithmetic), depth and lot-rounding rejections, cycle enumeration,
 Bellman-Ford sweeps, WebSocket reconnect and staleness state machines, HMAC signing against
@@ -360,16 +360,20 @@ minute is not judged by the standard of one that ticks ten times a second. A mea
 scan discarded 85% of its evaluations to a single global window. Set the ceiling to 0 to hold every
 symbol to one window instead.
 
-`detection.maxQuoteSkewMs` is the guard that widening makes necessary. A cycle whose legs are each
-individually fresh can still be incoherent — a loop priced from a 10ms-old quote and a 4s-old one
-describes a market that existed at no single instant, and the apparent edge is usually just the
-newer leg having moved. Age cannot catch it, because any window wide enough to admit the older
-quote admits the newer one too. Uniformly stale is fine; *unevenly* stale is not.
+`detection.maxQuoteSkewMs` guards coherence among the **active** legs — those inside the base
+window. Two active quotes far apart in `receivedAt` describe a market that existed at no single
+instant, and the apparent edge is usually just the newer leg having moved; age alone cannot catch
+it, because any window wide enough to admit the older quote admits the newer one too. A leg
+admitted via the widened window is deliberately exempt: a thin symbol's `receivedAt` tracks its own
+last change rather than market time, so measuring it against an active leg's timestamp measures
+thinness, not incoherence — an earlier version made that mistake and cancelled the widened window
+for every mixed cycle, which is nearly all of them.
 
 This is safe for the reason the problem exists: `bookTicker` pushes on *every* change, so a quote
 that has not been re-sent has not moved, and a socket that dies silently is caught by the feed's own
-staleness watchdog rather than by this. The executor still uses the strict `maxBookAgeMs` when it
-prices an actual order.
+staleness watchdog rather than by this. The executor uses the **same** window when it prices an
+actual order — it must, because a stricter executor refuses at leg 2 what detection admitted at
+leg 1, after funds are already committed; the IOC limit price is what actually bounds a moved book.
 
 And the economic caveat, which matters more than either: Binance.US lists far fewer pairs with much
 thinner books. Triangular arbitrage needs dense cross-pairs to have cycles at all, and the ~30bps
