@@ -364,7 +364,7 @@ async function commandScan(args: ParsedArgs): Promise<number> {
 		for (const slug of universe.slugs) {
 			if (!running) break;
 			try {
-				const wireBook = await Promise.race([client.book(slug), stopSignal]);
+				const wireBook = await raceWithStop(client.book(slug), stopSignal);
 				if (!wireBook) break;
 				const book = bookFromWire(wireBook, Date.now());
 				if (book) {
@@ -439,7 +439,7 @@ async function commandScan(args: ParsedArgs): Promise<number> {
 			for (const slug of universe.slugs) {
 				if (!running) break;
 				try {
-					const wireBook = await Promise.race([client.book(slug), stopSignal]);
+					const wireBook = await raceWithStop(client.book(slug), stopSignal);
 					if (!wireBook) break;
 					const book = bookFromWire(wireBook, Date.now());
 					if (book && store.apply(book)) detector.onBookUpdate(slug);
@@ -743,6 +743,18 @@ function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => {
 		setTimeout(resolve, ms);
 	});
+}
+
+/**
+ * Races a venue request against the stop signal, resolving undefined when the stop wins.
+ *
+ * The abandoned request must be given a handler: a request in flight when the operator hits
+ * Ctrl-C can still reject (timeout abort, transport error), and an unobserved rejection crashes
+ * Node before the scan summary ever prints.
+ */
+function raceWithStop<T>(request: Promise<T>, stopSignal: Promise<undefined>): Promise<T | undefined> {
+	request.catch(() => {});
+	return Promise.race([request, stopSignal]);
 }
 
 async function main(): Promise<void> {
