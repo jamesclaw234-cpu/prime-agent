@@ -1,0 +1,9 @@
+{
+  "venue": {
+    "gatewayBaseUrl": "http://127.0.0.1:8091",
+    "apiBaseUrl": "http://127.0.0.1:8091"
+  },
+  "observability": {
+    "logLevel": "info"
+  }
+}
