@@ -224,7 +224,12 @@ describe("argument parsing", () => {
 describe("shipped config profiles", () => {
 	// The profiles are documentation people copy verbatim. A profile that no longer validates is a
 	// broken instruction, so they are loaded here rather than trusted to stay correct.
-	const profiles = ["arb.config.example.json", "binance-us.config.json", "mock.config.json"];
+	const profiles = [
+		"arb.config.example.json",
+		"binance-us.config.json",
+		"binance-us.live.config.json",
+		"mock.config.json",
+	];
 
 	for (const profile of profiles) {
 		it(`${profile} loads and validates`, () => {
@@ -247,6 +252,16 @@ describe("shipped config profiles", () => {
 		expect(new URL(config.binance.restBaseUrl).hostname).toBe("127.0.0.1");
 		expect(new URL(config.binance.wsBaseUrl).hostname).toBe("127.0.0.1");
 		expect(config.mode).toBe("paper");
+	});
+
+	it("the live profile is armed in config but still needs the other three gate conditions", () => {
+		const config = loadConfig({ file: join(import.meta.dirname, "..", "binance-us.live.config.json"), env: {} });
+		expect(config.mode).toBe("live");
+		// Risk caps sized for a small account: the daily halt must be a fraction of it, not larger.
+		expect(config.risk.maxDailyLoss).toBe(2);
+		expect(config.risk.maxCyclesPerDay).toBe(50);
+		// mode alone opens nothing: no flag, no confirmation phrase, no credentials.
+		expect(evaluateLiveGate(config, {}, false).allowed).toBe(false);
 	});
 
 	it("refuses --testnet against Binance.US, which has no testnet", () => {
