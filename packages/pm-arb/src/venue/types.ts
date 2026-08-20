@@ -134,11 +134,58 @@ export interface Order {
 	readonly createTime?: string;
 }
 
+export type ExecutionType =
+	| "EXECUTION_TYPE_NEW"
+	| "EXECUTION_TYPE_PARTIAL_FILL"
+	| "EXECUTION_TYPE_FILL"
+	| "EXECUTION_TYPE_CANCELED"
+	| "EXECUTION_TYPE_REPLACE"
+	| "EXECUTION_TYPE_REJECTED"
+	| "EXECUTION_TYPE_EXPIRED"
+	| "EXECUTION_TYPE_DONE_FOR_DAY";
+
+export interface Execution {
+	readonly id?: string;
+	readonly order?: Order;
+	readonly lastShares?: string;
+	readonly lastPx?: Amount;
+	readonly type?: ExecutionType;
+	readonly text?: string;
+	readonly orderRejectReason?: string;
+	readonly transactTime?: string;
+	readonly tradeId?: string;
+	readonly aggressor?: boolean;
+	readonly commissionNotionalCollected?: Amount;
+}
+
+/**
+ * What POST /v1/orders actually returns: NOT an {order} envelope. Order state, fills and average
+ * price live inside executions[i].order. Get and preview use the {order} envelope; create does
+ * not - a divergence that only a shape-checking fake catches before the live venue does.
+ */
+export interface CreateOrderResponse {
+	readonly id?: string;
+	readonly executions?: readonly Execution[];
+}
+
+/** Positions are keyed by market slug on the wire - a dict, not an array. */
 export interface UserPosition {
-	readonly marketSlug?: string;
-	readonly quantity?: string;
-	readonly side?: string;
-	readonly avgPx?: Amount;
+	readonly netPosition?: string;
+	readonly qtyBought?: string;
+	readonly qtySold?: string;
+	readonly cost?: Amount;
+	readonly realized?: Amount;
+	readonly bodPosition?: string;
+	readonly expired?: boolean;
+	readonly updateTime?: string;
+	readonly cashValue?: Amount;
+	readonly qtyAvailable?: string;
+}
+
+export interface GetUserPositionsResponse {
+	readonly positions?: Readonly<Record<string, UserPosition>>;
+	readonly nextCursor?: string;
+	readonly eof?: boolean;
 }
 
 /** Error envelope. The SDK surfaces { message } with the HTTP status; mirror that. */

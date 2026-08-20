@@ -204,7 +204,9 @@ export class MarketDataFeed {
 					shard.state = "open";
 					shard.connectedAt = this.now();
 					shard.lastMessageAt = this.now();
-					shard.backoff.reset();
+					// The backoff resets on the first BOOK, not here: a venue that accepts the upgrade
+					// and then drops (rolling deploy, connection cap) or refuses the subscription would
+					// otherwise be redialed at the minimum jitter forever.
 					// Subscription is a message, not a URL. One request per shard; the requestId ties
 					// error replies back to what was asked.
 					const requestId = `md-${shard.index}-${++this.subscriptionCounter}`;
@@ -224,7 +226,7 @@ export class MarketDataFeed {
 					if (!isCurrent()) return;
 					shard.lastMessageAt = this.now();
 					shard.messages++;
-					this.handleMessage(data, shard.index);
+					this.handleMessage(data, shard);
 				},
 				onClose: (code, reason) => {
 					if (!isCurrent()) return;
@@ -243,7 +245,7 @@ export class MarketDataFeed {
 		}
 	}
 
-	private handleMessage(data: string, shardIndex: number): void {
+	private handleMessage(data: string, shard: Shard): void {
 		let message: WireMessage;
 		try {
 			message = JSON.parse(data) as WireMessage;
@@ -254,16 +256,22 @@ export class MarketDataFeed {
 		// Heartbeats refresh liveness (already done by the caller) and carry nothing else.
 		if (message.heartbeat) return;
 		if (message.error) {
-			// A subscription-level refusal. The books simply never arrive if this is ignored, so it
-			// is counted and logged loudly rather than filed under parse errors.
+			// A subscription-level refusal. Left alone, this shard would sit "open" with zero books
+			// forever - the venue's heartbeats keep defeating the silence watchdog - so it is
+			// counted, logged loudly, and the shard reconnects THROUGH the backoff: a transient
+			// refusal recovers, a permanent one churns at the backoff ceiling instead of the floor.
 			this.serverErrors++;
-			this.logger.error("ws server error", { shard: shardIndex, error: message.error });
+			this.logger.error("ws server error", { shard: shard.index, error: message.error });
+			this.dropConnection(shard);
+			this.scheduleReconnect(shard);
 			return;
 		}
 		const raw = message.marketData;
 		if (!raw) return;
 		const book = bookFromWire(raw, this.now());
 		if (!book) return;
+		// A delivered book proves this connection useful; only now does the redial clock reset.
+		shard.backoff.reset();
 		this.options.onUpdate(book);
 	}
 
@@ -291,7 +299,8 @@ export class MarketDataFeed {
 		shard.watchdog.unref?.();
 	}
 
-	private forceReconnect(shard: Shard): void {
+	/** Detaches and closes a shard's socket; the generation bump mutes its remaining callbacks. */
+	private dropConnection(shard: Shard): void {
 		const connection = shard.connection;
 		shard.generation++;
 		shard.connection = undefined;
@@ -301,8 +310,13 @@ export class MarketDataFeed {
 		} catch {
 			// Already closed.
 		}
-		shard.reconnects++;
-		this.connect(shard);
+	}
+
+	private forceReconnect(shard: Shard): void {
+		this.dropConnection(shard);
+		// Through the backoff, never straight to connect(): a server that accepts and stays silent
+		// would otherwise be redialed instantly every staleTimeoutMs.
+		this.scheduleReconnect(shard);
 	}
 
 	private scheduleReconnect(shard: Shard): void {

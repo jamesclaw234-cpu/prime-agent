@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { BookStore, type TopOfBook } from "../src/core/book.js";
+import { BookStore, bookFromWire, type TopOfBook } from "../src/core/book.js";
 import { Detector, type Opportunity } from "../src/core/detector.js";
 import { makeFeeModel, setEdgePerDollar, takerFeePerShare, ZERO_FEES } from "../src/core/fees.js";
 import { decFromString as d, decToNumber } from "../src/util/decimal.js";
@@ -18,7 +18,12 @@ function makeBook(slug: string, bid: string, ask: string, bidQty = "100", askQty
 	};
 }
 
-function harness(books: TopOfBook[], events: { eventSlug: string; marketSlugs: string[] }[], minNet = 0.001) {
+function harness(
+	books: TopOfBook[],
+	events: { eventSlug: string; marketSlugs: string[] }[],
+	minNet = 0.001,
+	minSets = 1,
+) {
 	const store = new BookStore(() => NOW);
 	for (const book of books) store.apply(book);
 	const found: Opportunity[] = [];
@@ -27,6 +32,7 @@ function harness(books: TopOfBook[], events: { eventSlug: string; marketSlugs: s
 		events,
 		fee: makeFeeModel("0.05", "0.0125"),
 		minNetPerSet: minNet,
+		minSets,
 		maxBookAgeMs: 5000,
 		maxBookAgeCeilingMs: 0,
 		now: () => NOW,
@@ -143,5 +149,62 @@ describe("edge distribution", () => {
 		expect(stats.setsPriced).toBeGreaterThan(0);
 		expect(Object.keys(stats.histogram).length).toBeGreaterThan(0);
 		expect(stats.bestGrossEvent).toBeDefined();
+	});
+});
+
+describe("executable depth", () => {
+	// A dislocated 3-outcome event whose asks sum to 0.90: comfortably profitable after fees.
+	const DISLOCATED = (thinAskQty: string) => [
+		makeBook("cand-a", "0.28", "0.30", "100", thinAskQty),
+		makeBook("cand-b", "0.28", "0.30"),
+		makeBook("cand-c", "0.28", "0.30"),
+	];
+	const EVENT = [{ eventSlug: "election", marketSlugs: ["cand-a", "cand-b", "cand-c"] }];
+
+	it("does not report depth below the venue's minimum order quantity as an opportunity", () => {
+		// 3 displayed shares cannot form a legal 5-share-minimum order on ANY leg, so no window
+		// existed - reporting one would tell the operator a lie at the summary's headline line.
+		const thin = harness(DISLOCATED("3"), EVENT, 0.001, 5);
+		thin.detector.scanAll();
+		expect(thin.found).toHaveLength(0);
+
+		const deep = harness(DISLOCATED("7"), EVENT, 0.001, 5);
+		deep.detector.scanAll();
+		expect(deep.found).toHaveLength(1);
+		expect(deep.found[0].maxSets).toBe(7);
+	});
+
+	it("floors displayed shares in exact arithmetic: near-integer dust is not a share", () => {
+		// 0.999999999999999999 shares rounds UP to 1.0 through a float, manufacturing an
+		// executable share out of dust; BigInt floor division must report zero.
+		const dusty = harness(DISLOCATED("0.999999999999999999"), EVENT, 0.001, 1);
+		dusty.detector.scanAll();
+		expect(dusty.found).toHaveLength(0);
+
+		// And an exact large integer must not LOSE a share to float spacing: through a double,
+		// 100000e18 floors to 99999. The other legs still cap maxSets; the leg itself must be exact.
+		const large = harness(DISLOCATED("100000"), EVENT, 0.001, 1);
+		large.detector.scanAll();
+		expect(large.found).toHaveLength(1);
+		const thickLeg = large.found[0].legs.find((leg) => leg.slug === "cand-a");
+		expect(thickLeg?.availableShares).toBe(100_000);
+	});
+});
+
+describe("wire book state", () => {
+	const WIRE = {
+		marketSlug: "alpha",
+		bids: [{ px: { value: "0.44", currency: "USD" as const }, qty: "100" }],
+		offers: [{ px: { value: "0.47", currency: "USD" as const }, qty: "100" }],
+	};
+
+	it("refuses to price a book whose market is not open", () => {
+		// A suspended market keeps displaying its last quotes; nobody can trade them.
+		expect(bookFromWire({ ...WIRE, state: "MARKET_STATE_SUSPENDED" }, NOW)).toBeUndefined();
+		expect(bookFromWire({ ...WIRE, state: "MARKET_STATE_HALTED" }, NOW)).toBeUndefined();
+		expect(bookFromWire({ ...WIRE, state: "MARKET_STATE_MATCH_AND_CLOSE_AUCTION" }, NOW)).toBeUndefined();
+		// Open, or a payload that omits state entirely, prices normally.
+		expect(bookFromWire({ ...WIRE, state: "MARKET_STATE_OPEN" }, NOW)).toBeDefined();
+		expect(bookFromWire(WIRE, NOW)).toBeDefined();
 	});
 });

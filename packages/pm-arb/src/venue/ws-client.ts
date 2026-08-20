@@ -34,6 +34,7 @@ export function rawWebSocketFactory(options: RawWsOptions = {}): WsFactory {
 
 class RawWebSocket implements WsConnection {
 	private socket?: Socket;
+	private readonly request: http.ClientRequest;
 	private buffer: Buffer = Buffer.alloc(0);
 	private fragments: Buffer[] = [];
 	private closed = false;
@@ -70,6 +71,7 @@ class RawWebSocket implements WsConnection {
 			method: "GET",
 			headers,
 		});
+		this.request = request;
 
 		this.connectTimer = setTimeout(() => {
 			request.destroy(new Error("WebSocket connect timeout"));
@@ -78,6 +80,12 @@ class RawWebSocket implements WsConnection {
 
 		request.on("upgrade", (response, socket, head) => {
 			this.clearConnectTimer();
+			// close() may have run while the dial was in flight. Without this guard the late 101
+			// would fire onOpen AFTER onClose and orphan an established, authenticated socket.
+			if (this.closed) {
+				socket.destroy();
+				return;
+			}
 			if (response.headers["sec-websocket-accept"] !== expectAccept) {
 				this.failed(new Error("server returned a wrong Sec-WebSocket-Accept"));
 				socket.destroy();
@@ -109,6 +117,9 @@ class RawWebSocket implements WsConnection {
 		if (this.socket) {
 			this.sendClose(1000, "OK");
 			this.socket.end();
+		} else {
+			// Still dialing: abort the upgrade request so no socket is ever established for it.
+			this.request.destroy();
 		}
 		this.emitClose(1000, "closed by client");
 	}

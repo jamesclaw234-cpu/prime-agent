@@ -108,6 +108,9 @@ export class BookStore {
 export function bookFromWire(raw: MarketBook, receivedAt: number): TopOfBook | undefined {
 	const slug = raw.marketSlug;
 	if (!slug) return undefined;
+	// A suspended/halted/auction market keeps displaying its last quotes, but nobody can trade
+	// them - pricing "opportunities" against such a book corrupts every scan statistic.
+	if (raw.state !== undefined && raw.state !== "MARKET_STATE_OPEN") return undefined;
 	const bestBid = raw.bids?.[0];
 	const bestOffer = raw.offers?.[0];
 	if (!bestBid || !bestOffer) return undefined;

@@ -1,4 +1,4 @@
-import { type Dec, decToNumber } from "../util/decimal.js";
+import { DEC_ONE, type Dec, decToNumber } from "../util/decimal.js";
 import { type Logger, silentLogger } from "../util/logger.js";
 import type { BookStore, MarketSlug, TopOfBook } from "./book.js";
 import { type FeeModel, setEdgePerDollar } from "./fees.js";
@@ -48,6 +48,12 @@ export interface DetectorOptions {
 	readonly fee: FeeModel;
 	/** Net dollars per set required to report an opportunity, e.g. 0.005 = half a cent. */
 	readonly minNetPerSet: number;
+	/**
+	 * Sets below this are not reported as opportunities: executing N sets means an N-share order
+	 * on every leg, and the venue refuses orders under its minimum quantity - depth that cannot
+	 * form a legal order is not an executable window. Defaults to 1 (no venue minimum).
+	 */
+	readonly minSets?: number;
 	readonly maxBookAgeMs: number;
 	readonly maxBookAgeCeilingMs: number;
 	readonly onOpportunity?: (opportunity: Opportunity) => void;
@@ -208,7 +214,7 @@ export class Detector {
 
 		if (netNum < this.options.minNetPerSet) return;
 		const maxSets = Math.min(...legs.map((leg) => leg.availableShares));
-		if (maxSets <= 0) return;
+		if (maxSets < Math.max(1, this.options.minSets ?? 1)) return;
 
 		this.opportunities++;
 		const opportunity: Opportunity = {
@@ -252,7 +258,13 @@ export class Detector {
 	}
 }
 
-/** Displayed depth in whole shares; fractional dust in a quote is not an executable share. */
+/**
+ * Displayed depth in whole shares; fractional dust in a quote is not an executable share.
+ *
+ * Floored in BigInt, not via decToNumber: the float conversion rounds 0.999999999999999999 up to
+ * exactly 1.0 (double spacing at 1e18 is 128), manufacturing an executable share from dust, and
+ * rounds exact large depths like 100000 DOWN a share. Integer division cannot do either.
+ */
 function wholeShares(qty: Dec): number {
-	return Math.floor(decToNumber(qty));
+	return Number((qty as bigint) / DEC_ONE);
 }

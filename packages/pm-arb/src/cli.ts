@@ -152,6 +152,8 @@ interface Wired {
 	readonly config: PmArbConfig;
 	readonly client: PolymarketRestClient;
 	readonly logger: Logger;
+	/** Set when credentials were present but unusable. Public commands proceed; doctor reports it. */
+	readonly credentialProblem?: string;
 }
 
 function wire(args: ParsedArgs): Wired {
@@ -163,15 +165,32 @@ function wire(args: ParsedArgs): Wired {
 		level: config.observability.logLevel,
 		pretty: process.stderr.isTTY ?? false,
 	});
+	// A malformed secret must not crash commands that never needed it - `markets` runs keyless,
+	// and doctor exists to DIAGNOSE exactly this. Parse here, strip on failure, carry the reason.
+	let credentialProblem: string | undefined;
+	let keyId = config.venue.keyId;
+	let secretKey = config.venue.secretKey;
+	if (secretKey) {
+		try {
+			privateKeyFromSecret(secretKey);
+		} catch (error) {
+			credentialProblem = describe(error);
+			keyId = undefined;
+			secretKey = undefined;
+		}
+	}
 	const client = new PolymarketRestClient({
 		gatewayBaseUrl: config.venue.gatewayBaseUrl,
 		apiBaseUrl: config.venue.apiBaseUrl,
-		keyId: config.venue.keyId,
-		secretKey: config.venue.secretKey,
+		keyId,
+		secretKey,
 		timeoutMs: config.venue.requestTimeoutMs,
 		logger,
 	});
-	return { config, client, logger };
+	if (credentialProblem) {
+		logger.warn("credentials present but unusable - continuing without them", { problem: credentialProblem });
+	}
+	return { config, client, logger, credentialProblem };
 }
 
 function buildOverrides(args: ParsedArgs): unknown {
@@ -210,6 +229,8 @@ async function commandMarkets(args: ParsedArgs): Promise<number> {
 	}
 	const now = Date.now();
 	let bestGrossEvent: { slug: string; edge: number } | undefined;
+	let fetches = 0;
+	let fetchFailures = 0;
 
 	for (const group of universe.groups) {
 		out(`event ${group.eventSlug}`);
@@ -218,6 +239,7 @@ async function commandMarkets(args: ParsedArgs): Promise<number> {
 		let priced = 0;
 		for (const slug of group.marketSlugs) {
 			let line = `  ${slug.padEnd(40)}`;
+			fetches++;
 			try {
 				const book = bookFromWire(await client.book(slug), now);
 				if (!book) {
@@ -238,6 +260,7 @@ async function commandMarkets(args: ParsedArgs): Promise<number> {
 			} catch (error) {
 				line += `  (book fetch failed: ${describe(error)})`;
 				askSum = undefined;
+				fetchFailures++;
 			}
 			out(line);
 		}
@@ -260,6 +283,12 @@ async function commandMarkets(args: ParsedArgs): Promise<number> {
 		);
 	}
 	logger.debug("markets snapshot complete", { events: universe.groups.length, markets: universe.slugs.length });
+	if (fetchFailures > 0 && fetchFailures === fetches) {
+		// A snapshot in which not one book could be fetched is an outage report, not a result -
+		// a wrapping script must not archive it as success.
+		out("every book fetch failed - the snapshot contains no prices");
+		return 1;
+	}
 	return 0;
 }
 
@@ -289,35 +318,65 @@ async function commandScan(args: ParsedArgs): Promise<number> {
 		events: universe.groups,
 		fee: makeFeeModel(config.fees.takerRate, config.fees.makerRebateRate),
 		minNetPerSet: config.detection.minNetPerSet,
+		minSets: config.venue.minOrderQuantity,
 		maxBookAgeMs: config.detection.maxBookAgeMs,
 		maxBookAgeCeilingMs: config.detection.maxBookAgeCeilingMs,
 		logger,
 		onOpportunity: (opportunity) => {
 			opportunityCount++;
-			if (opportunities.length < 200) opportunities.push(opportunity);
+			// Bounded retention of the BEST by net, not the first N seen: a long scan's true best
+			// must never be missing from its own top-opportunities table.
+			if (opportunities.length < 200) {
+				opportunities.push(opportunity);
+				return;
+			}
+			let minIndex = 0;
+			for (let i = 1; i < opportunities.length; i++) {
+				if (decToNumber(opportunities[i].netPerSet) < decToNumber(opportunities[minIndex].netPerSet)) minIndex = i;
+			}
+			if (decToNumber(opportunity.netPerSet) > decToNumber(opportunities[minIndex].netPerSet)) {
+				opportunities[minIndex] = opportunity;
+			}
 		},
 	});
 
-	// Seed every book over REST before streaming, so event sums are evaluable from the start
-	// instead of waiting for each leg's first push on markets that may not tick for minutes.
-	for (const slug of universe.slugs) {
-		try {
-			const book = bookFromWire(await client.book(slug), Date.now());
-			if (book) {
-				store.apply(book);
-				detector.onBookUpdate(slug);
-			}
-		} catch (error) {
-			logger.warn("seed snapshot failed", { slug, error: describe(error) });
-		}
-	}
-	logger.info("books seeded", { markets: store.size });
+	// The stop machinery exists BEFORE any venue request is awaited, so Ctrl-C during seeding -
+	// which can sit inside the rate meter for tens of seconds - still lands.
+	let running = true;
+	const stopped = new Promise<void>((resolve) => {
+		const stop = (): void => {
+			if (!running) return;
+			running = false;
+			resolve();
+		};
+		if (args.durationSec) setTimeout(stop, args.durationSec * 1000);
+		process.on("SIGINT", stop);
+		process.on("SIGTERM", stop);
+	});
+	const stopSignal = stopped.then((): undefined => undefined);
 
 	const hasCredentials = client.hasCredentials;
-	let running = true;
 	let feed: MarketDataFeed | undefined;
 
 	if (hasCredentials && config.venue.keyId && config.venue.secretKey) {
+		// Seed every book over REST before streaming, so event sums are evaluable from the start
+		// instead of waiting for each leg's first push on markets that may not tick for minutes.
+		for (const slug of universe.slugs) {
+			if (!running) break;
+			try {
+				const wireBook = await Promise.race([client.book(slug), stopSignal]);
+				if (!wireBook) break;
+				const book = bookFromWire(wireBook, Date.now());
+				if (book) {
+					store.apply(book);
+					detector.onBookUpdate(slug);
+				}
+			} catch (error) {
+				logger.warn("seed snapshot failed", { slug, error: describe(error) });
+			}
+		}
+		logger.info("books seeded", { markets: store.size });
+
 		const keyId = config.venue.keyId;
 		const privateKey = privateKeyFromSecret(config.venue.secretKey);
 		feed = new MarketDataFeed({
@@ -343,8 +402,12 @@ async function commandScan(args: ParsedArgs): Promise<number> {
 		});
 	}
 
+	// Deliberately NOT unref'd: every timer inside the feed is, so during a moment when all
+	// shards are between connections the event loop would otherwise be empty and Node would exit
+	// mid-scan with code 0 and no summary. This interval is the scan's liveness anchor.
 	const metricsTimer = setInterval(() => {
 		const stats = detector.stats();
+		const feedStats = feed?.stats();
 		logger.info("scan metrics", {
 			updates: store.updateCount,
 			setsPriced: stats.setsPriced,
@@ -352,24 +415,16 @@ async function commandScan(args: ParsedArgs): Promise<number> {
 			opportunities: stats.opportunities,
 			bestNetPair: stats.bestNetPair,
 			bestNetEvent: stats.bestNetEvent,
-			...(feed ? { openShards: feed.stats().openShards, reconnects: feed.stats().reconnects } : {}),
+			...(feedStats
+				? {
+						openShards: feedStats.openShards,
+						reconnects: feedStats.reconnects,
+						serverErrors: feedStats.serverErrors,
+						parseErrors: feedStats.parseErrors,
+					}
+				: {}),
 		});
 	}, config.observability.metricsIntervalMs);
-	metricsTimer.unref?.();
-
-	const stopped = new Promise<void>((resolve) => {
-		const stop = (): void => {
-			if (!running) return;
-			running = false;
-			resolve();
-		};
-		if (args.durationSec) {
-			const timer = setTimeout(stop, args.durationSec * 1000);
-			timer.unref?.();
-		}
-		process.on("SIGINT", stop);
-		process.on("SIGTERM", stop);
-	});
 
 	if (feed) {
 		await stopped;
@@ -377,13 +432,16 @@ async function commandScan(args: ParsedArgs): Promise<number> {
 		// Round-robin refresh, paced EVENLY at the public budget rather than metered reactively:
 		// a burst would spend the whole minute's budget at once and then stall inside the client's
 		// meter for the rest of it - unstoppable mid-wait, and leaving every book stale between
-		// bursts. One request a second keeps freshness flat and the stop prompt.
+		// bursts. There is no separate seed phase here for the same reason: the first round IS the
+		// seed, already paced. One request a second keeps freshness flat and the stop prompt.
 		const spacingMs = Math.ceil(60_000 / PUBLIC_REQUESTS_PER_MINUTE);
 		while (running) {
 			for (const slug of universe.slugs) {
 				if (!running) break;
 				try {
-					const book = bookFromWire(await client.book(slug), Date.now());
+					const wireBook = await Promise.race([client.book(slug), stopSignal]);
+					if (!wireBook) break;
+					const book = bookFromWire(wireBook, Date.now());
 					if (book && store.apply(book)) detector.onBookUpdate(slug);
 				} catch (error) {
 					logger.warn("poll failed", { slug, error: describe(error) });
@@ -463,7 +521,7 @@ function formatCell(value: number | undefined): string {
 // --- doctor --------------------------------------------------------------------------------------
 
 async function commandDoctor(args: ParsedArgs): Promise<number> {
-	const { config, client, logger } = wire(args);
+	const { config, client, logger, credentialProblem } = wire(args);
 	let failures = 0;
 	const pass = (name: string, detail: string): void => out(`  PASS  ${name.padEnd(22)} ${detail}`);
 	const warn = (name: string, detail: string): void => out(`  WARN  ${name.padEnd(22)} ${detail}`);
@@ -501,23 +559,24 @@ async function commandDoctor(args: ParsedArgs): Promise<number> {
 		}
 	}
 
+	if (credentialProblem) {
+		// wire() stripped the unusable key so public commands still work; here it is THE finding.
+		fail("key material", `${SECRET_KEY_ENV} is set but unusable: ${credentialProblem}`);
+		out("\nsome checks FAILED");
+		return 1;
+	}
 	if (!config.venue.keyId || !config.venue.secretKey) {
 		warn("credentials", `${KEY_ID_ENV}/${SECRET_KEY_ENV} not set - signed checks skipped`);
 		out(failures === 0 ? "\npublic checks passed" : "\nsome checks FAILED");
 		return failures === 0 ? 0 : 1;
 	}
 
-	let signedOk = false;
-	try {
-		privateKeyFromSecret(config.venue.secretKey);
-		pass(
-			"key material",
-			`key id ${config.venue.keyId.slice(0, 6)}..., secret fingerprint ${keyFingerprint(config.venue.secretKey)}`,
-		);
-	} catch (error) {
-		fail("key material", describe(error));
-	}
+	pass(
+		"key material",
+		`key id ${config.venue.keyId.slice(0, 6)}..., secret fingerprint ${keyFingerprint(config.venue.secretKey)}`,
+	);
 
+	let signedOk = false;
 	try {
 		const orders = await client.openOrders();
 		signedOk = true;
@@ -533,7 +592,7 @@ async function commandDoctor(args: ParsedArgs): Promise<number> {
 	if (signedOk) {
 		try {
 			const positions = await client.positions();
-			pass("positions", `${positions.length} positions readable`);
+			pass("positions", `${Object.keys(positions).length} positions readable`);
 		} catch (error) {
 			fail("positions", describe(error));
 		}
@@ -582,9 +641,14 @@ async function doctorPreview(
 		const venueBps = preview.commissionsBasisPoints;
 		if (venueBps === undefined) {
 			report.warn?.("fee check", "venue did not report commissionsBasisPoints in the preview");
+		} else if (!Number.isFinite(Number(venueBps))) {
+			report.warn?.("fee check", `venue reported a non-numeric commissionsBasisPoints: ${venueBps}`);
 		} else {
-			const configuredBps = Math.round(Number(config.fees.takerRate) * 10_000);
-			if (Number(venueBps) === configuredBps) {
+			// Compared on the bps scale without rounding either side: the venue types this field as
+			// a string, which admits fractional basis points, and rounding the config would both
+			// fail exact matches like 12.5bps and wave through a config off by half a bp.
+			const configuredBps = Number(config.fees.takerRate) * 10_000;
+			if (Math.abs(Number(venueBps) - configuredBps) < 0.005) {
 				report.pass("fee check", `venue reports ${venueBps}bps, matching fees.takerRate=${config.fees.takerRate}`);
 			} else {
 				report.fail(
@@ -600,9 +664,11 @@ async function doctorPreview(
 	} catch (error) {
 		if (error instanceof MissingCredentialsError) {
 			report.fail("order preview", error.message);
-		} else if (error instanceof PolymarketApiError && error.httpStatus < 500 && error.httpStatus !== 401) {
-			// The signature was accepted and the venue answered about the ORDER - that is a working
-			// trading path even when this particular probe is refused (e.g. market state, funding).
+		} else if (error instanceof PolymarketApiError && error.httpStatus === 400) {
+			// Only a 400 means the venue ANSWERED about the order (market state, funding) - a
+			// working trading path even when this probe is refused. A transport failure (status 0),
+			// a 404 on a moved path, or a 429 means the fee reconciliation never ran: that is a
+			// failure of the check doctor exists for, never a benign warning.
 			report.warn?.("order preview", `venue refused the probe: ${error.message}`);
 		} else {
 			report.fail("order preview", describe(error));

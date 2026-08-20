@@ -4,7 +4,9 @@ import { createAuthHeaders, privateKeyFromSecret } from "./auth.js";
 import type {
 	ApiErrorBody,
 	CreateOrderParams,
+	CreateOrderResponse,
 	EventDetail,
+	GetUserPositionsResponse,
 	MarketBook,
 	MarketDetail,
 	Order,
@@ -132,13 +134,17 @@ export class PolymarketRestClient {
 
 	// --- trading and account (api host, signed) ---------------------------------------------------
 
-	async createOrder(params: CreateOrderParams, signal?: AbortSignal): Promise<Order> {
-		const body = await this.request<{ order?: Order }>("POST", "/v1/orders", {
+	/**
+	 * Places an order. The response is {id, executions} - order state, fills and avgPx live inside
+	 * executions[i].order, NOT in an {order} envelope like get and preview. Getting the envelope
+	 * wrong here passes against a permissive mock and returns all-undefined fields live.
+	 */
+	async createOrder(params: CreateOrderParams, signal?: AbortSignal): Promise<CreateOrderResponse> {
+		return this.request<CreateOrderResponse>("POST", "/v1/orders", {
 			body: params,
 			authenticated: true,
 			signal,
 		});
-		return body.order ?? (body as Order);
 	}
 
 	/**
@@ -181,12 +187,13 @@ export class PolymarketRestClient {
 		});
 	}
 
-	async positions(signal?: AbortSignal): Promise<UserPosition[]> {
-		const body = await this.request<{ positions?: UserPosition[] }>("GET", "/v1/portfolio/positions", {
+	/** Positions arrive as a dict keyed by market slug, not an array - mirrored as-is. */
+	async positions(signal?: AbortSignal): Promise<Readonly<Record<string, UserPosition>>> {
+		const body = await this.request<GetUserPositionsResponse>("GET", "/v1/portfolio/positions", {
 			authenticated: true,
 			signal,
 		});
-		return body.positions ?? [];
+		return body.positions ?? {};
 	}
 
 	// --- transport ---------------------------------------------------------------------------------

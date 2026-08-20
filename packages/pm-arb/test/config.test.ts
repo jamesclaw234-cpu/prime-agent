@@ -74,4 +74,23 @@ describe("loadConfig", () => {
 	it("rejects an unreadable file loudly rather than scanning with defaults", () => {
 		expect(() => loadConfig({ file: join(dir, "does-not-exist.json"), env: NO_CREDS })).toThrow(/cannot read/);
 	});
+
+	it("validates metricsIntervalMs: zero would flood stderr every millisecond of a scan", () => {
+		const zero = writeConfig("metrics-zero.json", { observability: { metricsIntervalMs: 0 } });
+		expect(() => loadConfig({ file: zero, env: NO_CREDS })).toThrow(/metricsIntervalMs/);
+		const text = writeConfig("metrics-text.json", { observability: { metricsIntervalMs: "30000" } });
+		expect(() => loadConfig({ file: text, env: NO_CREDS })).toThrow(/metricsIntervalMs/);
+	});
+
+	it("rejects prototype-chain keys as unknown instead of letting `in` wave them through", () => {
+		// `"constructor" in base` is true via the prototype chain; hasOwn must be what decides.
+		const inherited = writeConfig("inherited.json", { venue: { constructor: 1 } });
+		expect(() => loadConfig({ file: inherited, env: NO_CREDS })).toThrow(/unknown config key: venue.constructor/);
+		// __proto__ is the worst case: assignment would be a prototype WRITE, not a rejected typo.
+		// Written as raw bytes because JSON.stringify round-trips can drop the key.
+		const proto = join(dir, "proto.json");
+		writeFileSync(proto, '{"__proto__": {"polluted": 1}}');
+		expect(() => loadConfig({ file: proto, env: NO_CREDS })).toThrow(/unknown config key: __proto__/);
+		expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+	});
 });

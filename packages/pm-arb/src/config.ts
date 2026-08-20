@@ -21,6 +21,11 @@ export interface VenueConfig {
 	readonly keyId?: string;
 	readonly secretKey?: string;
 	readonly requestTimeoutMs: number;
+	/**
+	 * The venue's minimum order size in shares. Docs-derived, not in the SDK types, so it lives in
+	 * config like the fee rates do; displayed depth below it cannot form a legal order on any leg.
+	 */
+	readonly minOrderQuantity: number;
 }
 
 export interface UniverseConfig {
@@ -61,6 +66,7 @@ export const DEFAULT_CONFIG: PmArbConfig = {
 		gatewayBaseUrl: "https://gateway.polymarket.us",
 		apiBaseUrl: "https://api.polymarket.us",
 		requestTimeoutMs: 5000,
+		minOrderQuantity: 5,
 	},
 	universe: {
 		maxEvents: 12,
@@ -148,8 +154,10 @@ export function validateConfig(config: PmArbConfig): void {
 		}
 	}
 	requirePositive(config.venue.requestTimeoutMs, "venue.requestTimeoutMs");
+	requirePositive(config.venue.minOrderQuantity, "venue.minOrderQuantity");
 	requirePositive(config.universe.maxEvents, "universe.maxEvents");
 	requirePositive(config.universe.maxMarkets, "universe.maxMarkets");
+	requirePositive(config.observability.metricsIntervalMs, "observability.metricsIntervalMs");
 	requirePositive(config.detection.maxBookAgeMs, "detection.maxBookAgeMs");
 	requireNonNegative(config.detection.maxBookAgeCeilingMs, "detection.maxBookAgeCeilingMs");
 	requireNonNegative(config.detection.minNetPerSet, "detection.minNetPerSet");
@@ -185,7 +193,9 @@ function mergeInto(base: unknown, override: unknown, path: string): unknown {
 	const result: Record<string, unknown> = { ...base };
 	for (const [key, value] of Object.entries(override)) {
 		const fullPath = path ? `${path}.${key}` : key;
-		if (!(key in base)) throw new ConfigError(`unknown config key: ${fullPath}`);
+		// hasOwn, not `in`: the prototype chain would wave through "constructor", "toString" and -
+		// worse - "__proto__", whose assignment below is a prototype write, not a rejected typo.
+		if (!Object.hasOwn(base, key)) throw new ConfigError(`unknown config key: ${fullPath}`);
 		result[key] = mergeInto(base[key], value, fullPath);
 	}
 	return result;

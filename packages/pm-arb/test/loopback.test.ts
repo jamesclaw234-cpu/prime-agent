@@ -1,3 +1,5 @@
+import { randomBytes } from "node:crypto";
+import http from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
 import { BookStore, type TopOfBook } from "../src/core/book.js";
 import { decToString } from "../src/util/decimal.js";
@@ -79,9 +81,9 @@ describe("REST over a real socket", () => {
 		expect(fake.signatureFailures).toBe(1);
 	});
 
-	it("places a marketable IOC BUY_LONG and the fake's balance moves", async () => {
+	it("places a marketable IOC BUY_LONG: the create response is {id, executions}, not {order}", async () => {
 		const { fake, client } = await boot();
-		const order = await client.createOrder({
+		const response = await client.createOrder({
 			marketSlug: "yes-alpha",
 			intent: "ORDER_INTENT_BUY_LONG",
 			type: "ORDER_TYPE_LIMIT",
@@ -89,13 +91,17 @@ describe("REST over a real socket", () => {
 			quantity: 10,
 			tif: "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL",
 		});
-		expect(order.state).toBe("ORDER_STATE_FILLED");
-		expect(order.cumQuantity).toBe(10);
+		// Order state and fills live INSIDE executions[i].order on this venue's create response.
+		expect(response.id).toBeDefined();
+		const execution = response.executions?.[0];
+		expect(execution?.type).toBe("EXECUTION_TYPE_FILL");
+		expect(execution?.order?.state).toBe("ORDER_STATE_FILLED");
+		expect(execution?.order?.cumQuantity).toBe(10);
 		// 10 shares at the 0.47 ask.
 		expect(decToString(fake.balanceOf())).toBe("95.3");
 	});
 
-	it("refuses what the venue refuses: off-tick, out-of-range, sub-minimum, unfunded", async () => {
+	it("refuses what the venue refuses, each for its OWN reason, not one hiding another", async () => {
 		const { client } = await boot("2");
 		const base = {
 			marketSlug: "yes-alpha",
@@ -103,23 +109,40 @@ describe("REST over a real socket", () => {
 			type: "ORDER_TYPE_LIMIT" as const,
 			tif: "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL" as const,
 		};
-		const cases = [
-			{ ...base, price: { value: "0.475", currency: "USD" as const }, quantity: 10 },
-			{ ...base, price: { value: "1.00", currency: "USD" as const }, quantity: 10 },
-			{ ...base, price: { value: "0.47", currency: "USD" as const }, quantity: 4 },
-			{ ...base, price: { value: "0.47", currency: "USD" as const }, quantity: 10 },
+		// The message is asserted per case because the statuses are identical: with a $2 balance
+		// the out-of-range and off-tick cases would ALSO fail the funds check, so a status-only
+		// assertion could not tell whether the check it pins still exists.
+		const cases: { params: Parameters<typeof client.createOrder>[0]; reason: RegExp }[] = [
+			{ params: { ...base, price: { value: "0.475", currency: "USD" }, quantity: 10 }, reason: /tick/ },
+			{ params: { ...base, price: { value: "1.00", currency: "USD" }, quantity: 10 }, reason: /inside \(0, 1\)/ },
+			{ params: { ...base, price: { value: "0.47", currency: "USD" }, quantity: 4 }, reason: />= 5/ },
+			{ params: { ...base, price: { value: "0.47", currency: "USD" }, quantity: 10 }, reason: /buying power/ },
+			{
+				params: { ...base, intent: "BUY_LONG" as never, price: { value: "0.47", currency: "USD" }, quantity: 10 },
+				reason: /ORDER_INTENT/,
+			},
+			{
+				params: {
+					...base,
+					tif: "TIME_IN_FORCE_GOOD_TILL_CANCEL" as never,
+					price: { value: "0.47", currency: "USD" },
+					quantity: 10,
+				},
+				reason: /immediate orders only/,
+			},
 		];
-		for (const params of cases) {
+		for (const { params, reason } of cases) {
 			const error = await client.createOrder(params).catch((caught: unknown) => caught);
 			expect(error).toBeInstanceOf(PolymarketApiError);
 			expect((error as PolymarketApiError).httpStatus).toBe(400);
+			expect((error as PolymarketApiError).message).toMatch(reason);
 		}
 	});
 
 	it("fills BUY_SHORT against the mirrored side of the unified book", async () => {
 		const { client } = await boot();
 		// SHORT ask mirrors the LONG bid: 1 - 0.44 = 0.56.
-		const order = await client.createOrder({
+		const response = await client.createOrder({
 			marketSlug: "yes-alpha",
 			intent: "ORDER_INTENT_BUY_SHORT",
 			type: "ORDER_TYPE_LIMIT",
@@ -127,8 +150,16 @@ describe("REST over a real socket", () => {
 			quantity: 10,
 			tif: "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL",
 		});
-		expect(order.state).toBe("ORDER_STATE_FILLED");
-		expect(order.avgPx?.value).toBe("0.56");
+		const order = response.executions?.[0]?.order;
+		expect(order?.state).toBe("ORDER_STATE_FILLED");
+		expect(order?.avgPx?.value).toBe("0.56");
+	});
+
+	it("serves positions as a dict keyed by market slug, even when empty", async () => {
+		const { client } = await boot();
+		const positions = await client.positions();
+		expect(Array.isArray(positions)).toBe(false);
+		expect(Object.keys(positions)).toHaveLength(0);
 	});
 });
 
@@ -240,5 +271,60 @@ describe("order preview over a real socket", () => {
 				tif: "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL",
 			}),
 		).rejects.toMatchObject({ httpStatus: 400 });
+	});
+
+	it("refuses a preview whose intent is not a known enum value", async () => {
+		const { client } = await boot();
+		const error = await client
+			.previewOrder({
+				marketSlug: "yes-alpha",
+				intent: "BUY_LONG" as never,
+				type: "ORDER_TYPE_LIMIT",
+				price: { value: "0.01", currency: "USD" },
+				quantity: 5,
+				tif: "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL",
+			})
+			.catch((caught: unknown) => caught);
+		expect(error).toBeInstanceOf(PolymarketApiError);
+		expect((error as PolymarketApiError).message).toMatch(/ORDER_INTENT/);
+	});
+});
+
+describe("WebSocket framing strictness", () => {
+	it("fails the connection on an unmasked client frame, as RFC 6455 requires of servers", async () => {
+		const { fake, baseUrl } = await boot();
+		const target = new URL(baseUrl);
+		const privateKey = privateKeyFromSecret(SECRET);
+
+		// Hand-rolled handshake: the production client always masks, so proving the fake REFUSES
+		// an unmasked frame needs a client that misbehaves on purpose.
+		const socket = await new Promise<import("node:net").Socket>((resolve, reject) => {
+			const request = http.request({
+				host: target.hostname,
+				port: Number(target.port),
+				path: "/v1/ws/markets",
+				headers: {
+					connection: "Upgrade",
+					upgrade: "websocket",
+					"sec-websocket-version": "13",
+					"sec-websocket-key": randomBytes(16).toString("base64"),
+					...createAuthHeaders("test-key-1", privateKey, "GET", "/v1/ws/markets", Date.now()),
+				},
+			});
+			request.on("upgrade", (_response, upgradedSocket) => resolve(upgradedSocket));
+			request.on("response", () => reject(new Error("upgrade refused")));
+			request.on("error", reject);
+			request.end();
+		});
+		expect(fake.openConnections).toBe(1);
+
+		const closed = new Promise<void>((resolve) => socket.once("close", () => resolve()));
+		const payload = Buffer.from(JSON.stringify({ subscribe: { requestId: "x" } }), "utf8");
+		// FIN + text opcode, mask bit CLEAR: a frame no compliant client sends.
+		socket.write(Buffer.concat([Buffer.from([0x81, payload.length]), payload]));
+
+		await closed;
+		expect(fake.unmaskedFrames).toBe(1);
+		expect(fake.openConnections).toBe(0);
 	});
 });

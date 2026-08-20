@@ -35,7 +35,9 @@ import type { CreateOrderParams, EventDetail, MarketBook, OrderIntent } from "..
  *
  * Known gaps, chosen rather than accidental: no fee collection on fills (fees are modelled in ONE
  * place, the detection core; preview echoes configured basis points only), no rate-limit
- * enforcement, whole unfragmented WS frames only. Tests must not claim coverage of those.
+ * enforcement, whole unfragmented WS frames only, and no resting orders - a GTC/GTD order is
+ * REFUSED rather than silently matched with IOC semantics, so no test can pass against wrong
+ * resting behavior. Tests must not claim coverage of those.
  */
 
 export interface FakeMarketSpec {
@@ -82,6 +84,20 @@ interface Shard {
 
 const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
+const ORDER_INTENTS = new Set([
+	"ORDER_INTENT_BUY_LONG",
+	"ORDER_INTENT_SELL_LONG",
+	"ORDER_INTENT_BUY_SHORT",
+	"ORDER_INTENT_SELL_SHORT",
+]);
+const ORDER_TYPES = new Set(["ORDER_TYPE_LIMIT", "ORDER_TYPE_MARKET"]);
+const TIME_IN_FORCES = new Set([
+	"TIME_IN_FORCE_GOOD_TILL_CANCEL",
+	"TIME_IN_FORCE_GOOD_TILL_DATE",
+	"TIME_IN_FORCE_IMMEDIATE_OR_CANCEL",
+	"TIME_IN_FORCE_FILL_OR_KILL",
+]);
+
 export class FakePolymarketUS {
 	private server?: Server;
 	private readonly shards = new Set<Shard>();
@@ -99,6 +115,7 @@ export class FakePolymarketUS {
 	readonly paths: string[] = [];
 	signatureFailures = 0;
 	wsUpgradesRejected = 0;
+	unmaskedFrames = 0;
 	previews = 0;
 
 	constructor(options: FakeOptions) {
@@ -220,6 +237,14 @@ export class FakePolymarketUS {
 				const frame = decodeFrame(buffered);
 				if (!frame) return;
 				buffered = buffered.subarray(frame.consumed);
+				if (!frame.masked) {
+					// RFC 6455 5.1: fail the connection on any unmasked client frame, as real
+					// servers do. A masking regression in the client must die here, not live.
+					this.unmaskedFrames++;
+					this.shards.delete(shard);
+					socket.destroy();
+					return;
+				}
 				if (frame.opcode === 0x8) {
 					this.shards.delete(shard);
 					socket.end();
@@ -346,7 +371,8 @@ export class FakePolymarketUS {
 			return;
 		}
 		if (method === "GET" && path === "/v1/portfolio/positions") {
-			this.ok(res, { positions: [] });
+			// Positions are a dict keyed by market slug on the wire; even empty it is {}, not [].
+			this.ok(res, { positions: {}, eof: true });
 			return;
 		}
 		this.fail(res, 404, "not found");
@@ -426,6 +452,18 @@ export class FakePolymarketUS {
 	/** The static order checks shared by create and preview. Returns the refusal, or undefined. */
 	private validateOrderParams(params: CreateOrderParams): string | undefined {
 		if (!this.markets.has(params.marketSlug)) return "market not found";
+		// The SDK marks intent required and types intent/type/tif as closed enums; a venue speaking
+		// proto-style enum strings refuses values outside them. Without these checks a client that
+		// sent "BUY_LONG" or a lowercase tif would preview green here and 400 only in production.
+		if (!params.intent || !ORDER_INTENTS.has(params.intent)) {
+			return "intent is required and must be a known ORDER_INTENT_* value";
+		}
+		if (params.type !== undefined && !ORDER_TYPES.has(params.type)) {
+			return "type must be a known ORDER_TYPE_* value";
+		}
+		if (params.tif !== undefined && !TIME_IN_FORCES.has(params.tif)) {
+			return "tif must be a known TIME_IN_FORCE_* value";
+		}
 		if (!Number.isInteger(params.quantity) || params.quantity < this.minQuantity) {
 			return `quantity must be an integer >= ${this.minQuantity}`;
 		}
@@ -461,6 +499,14 @@ export class FakePolymarketUS {
 		if (problem || !market) {
 			record("ORDER_STATE_REJECTED", 0);
 			this.fail(res, problem === "market not found" ? 404 : 400, problem ?? "market not found");
+			return;
+		}
+		// Fake limitation, not venue behavior: matching here is immediate-only, so a resting TIF is
+		// refused rather than silently given IOC semantics and reported EXPIRED where the venue
+		// would rest it as NEW with funds locked.
+		if (params.tif !== "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL" && params.tif !== "TIME_IN_FORCE_FILL_OR_KILL") {
+			record("ORDER_STATE_REJECTED", 0);
+			this.fail(res, 400, "this fake matches immediate orders only (IOC/FOK)");
 			return;
 		}
 		const price = params.price ? decTryFromString(params.price.value) : undefined;
@@ -511,18 +557,37 @@ export class FakePolymarketUS {
 					? "ORDER_STATE_PARTIALLY_FILLED"
 					: "ORDER_STATE_EXPIRED";
 		record(state, filled);
+		// The create response is {id, executions} - the order lives INSIDE executions[i].order,
+		// never in an {order} envelope. That envelope belongs to get and preview only; serving it
+		// here is exactly the shape drift this checking fake exists to catch in the client.
+		const orderId = `ord-${this.nextOrderId++}`;
+		const order = {
+			id: orderId,
+			marketSlug: params.marketSlug,
+			intent: params.intent,
+			price: { value: decToString(price), currency: "USD" },
+			quantity: params.quantity,
+			cumQuantity: filled,
+			leavesQuantity: 0,
+			state,
+			avgPx: filled > 0 ? { value: decToString(fillPrice), currency: "USD" } : undefined,
+		};
 		this.ok(res, {
-			order: {
-				id: `ord-${this.nextOrderId++}`,
-				marketSlug: params.marketSlug,
-				intent: params.intent,
-				price: { value: decToString(price), currency: "USD" },
-				quantity: params.quantity,
-				cumQuantity: filled,
-				leavesQuantity: 0,
-				state,
-				avgPx: filled > 0 ? { value: decToString(fillPrice), currency: "USD" } : undefined,
-			},
+			id: orderId,
+			executions: [
+				{
+					id: `exec-${orderId}`,
+					type:
+						filled === params.quantity
+							? "EXECUTION_TYPE_FILL"
+							: filled > 0
+								? "EXECUTION_TYPE_PARTIAL_FILL"
+								: "EXECUTION_TYPE_EXPIRED",
+					order,
+					lastShares: String(filled),
+					lastPx: filled > 0 ? { value: decToString(fillPrice), currency: "USD" } : undefined,
+				},
+			],
 		});
 	}
 
@@ -560,6 +625,7 @@ function encodeFrame(opcode: number, payload: Buffer): Buffer {
 
 interface DecodedFrame {
 	readonly opcode: number;
+	readonly masked: boolean;
 	readonly payload: Buffer;
 	readonly consumed: number;
 }
@@ -567,6 +633,7 @@ interface DecodedFrame {
 function decodeFrame(buffer: Buffer): DecodedFrame | undefined {
 	if (buffer.length < 2) return undefined;
 	const opcode = buffer[0] & 0x0f;
+	// The mask bit is surfaced so the server-side caller can fail unmasked client frames.
 	const masked = (buffer[1] & 0x80) !== 0;
 	let length = buffer[1] & 0x7f;
 	let offset = 2;
@@ -585,5 +652,5 @@ function decodeFrame(buffer: Buffer): DecodedFrame | undefined {
 	offset += maskLength;
 	const payload = Buffer.from(buffer.subarray(offset, offset + length));
 	if (mask) for (let i = 0; i < payload.length; i++) payload[i] ^= mask[i % 4];
-	return { opcode, payload, consumed: offset + length };
+	return { opcode, masked, payload, consumed: offset + length };
 }
