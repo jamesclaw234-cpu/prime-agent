@@ -2,6 +2,7 @@ import { bookFromWire, type MarketSlug, type TopOfBook } from "../core/book.js";
 import { Backoff, type BackoffOptions, DEFAULT_BACKOFF } from "../util/backoff.js";
 import { type Logger, silentLogger } from "../util/logger.js";
 import type { MarketBook } from "./types.js";
+import { rawWebSocketFactory } from "./ws-client.js";
 
 /** Minimal WebSocket surface so the feed can be driven by a fake in tests. */
 export interface WsConnection {
@@ -17,18 +18,6 @@ export interface WsHandlers {
 }
 
 export type WsFactory = (url: string, handlers: WsHandlers) => WsConnection;
-
-export const nodeWebSocketFactory: WsFactory = (url, handlers) => {
-	const socket = new WebSocket(url);
-	socket.addEventListener("open", () => handlers.onOpen());
-	socket.addEventListener("message", (event) => {
-		const data: unknown = event.data;
-		handlers.onMessage(typeof data === "string" ? data : String(data));
-	});
-	socket.addEventListener("close", (event) => handlers.onClose(event.code, event.reason));
-	socket.addEventListener("error", (event) => handlers.onError(event));
-	return { send: (data: string) => socket.send(data), close: () => socket.close() };
-};
 
 /** Documented cap: one market-data connection carries at most this many instruments. */
 export const MAX_SLUGS_PER_CONNECTION = 10;
@@ -111,7 +100,9 @@ export class MarketDataFeed {
 
 	constructor(private readonly options: MarketDataFeedOptions) {
 		this.logger = options.logger ?? silentLogger();
-		this.wsFactory = options.wsFactory ?? nodeWebSocketFactory;
+		// The default is the hand-rolled client, never Node's built-in WebSocket: the venue signs
+		// the upgrade request itself, and the browser-API WebSocket cannot carry those headers.
+		this.wsFactory = options.wsFactory ?? rawWebSocketFactory();
 		this.now = options.now ?? Date.now;
 		this.setTimeoutFn = options.setTimeoutFn ?? setTimeout;
 		this.clearTimeoutFn = options.clearTimeoutFn ?? clearTimeout;

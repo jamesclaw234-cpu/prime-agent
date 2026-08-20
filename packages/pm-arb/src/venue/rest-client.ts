@@ -141,9 +141,20 @@ export class PolymarketRestClient {
 		return body.order ?? (body as Order);
 	}
 
-	/** Validates an order without placing it - this venue's free rehearsal rung, used by doctor. */
-	async previewOrder(params: CreateOrderParams, signal?: AbortSignal): Promise<unknown> {
-		return this.request<unknown>("POST", "/v1/order/preview", { body: params, authenticated: true, signal });
+	/**
+	 * Validates an order without placing it - this venue's free rehearsal rung, used by doctor.
+	 *
+	 * The wire shape differs from create: the SDK's PreviewOrderParams wraps the order in a
+	 * `request` field, and the response is an Order carrying the commission fields to reconcile
+	 * the configured fee rates against.
+	 */
+	async previewOrder(params: CreateOrderParams, signal?: AbortSignal): Promise<Order> {
+		const body = await this.request<{ order?: Order }>("POST", "/v1/order/preview", {
+			body: { request: params },
+			authenticated: true,
+			signal,
+		});
+		return body.order ?? (body as Order);
 	}
 
 	async openOrders(signal?: AbortSignal): Promise<Order[]> {

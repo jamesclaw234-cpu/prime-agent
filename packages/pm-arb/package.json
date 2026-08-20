@@ -18,7 +18,7 @@
 		"build": "tsgo -p tsconfig.build.json",
 		"dev": "tsgo -p tsconfig.build.json --watch --preserveWatchOutput",
 		"test": "vitest --run",
-		"start": "npx tsx src/cli.ts run"
+		"start": "npx tsx src/cli.ts scan"
 	},
 	"keywords": [
 		"polymarket",

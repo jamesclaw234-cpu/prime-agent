@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { BookStore, type TopOfBook } from "../src/core/book.js";
 import { decToString } from "../src/util/decimal.js";
-import { privateKeyFromSecret, rawPublicKey } from "../src/venue/auth.js";
+import { createAuthHeaders, privateKeyFromSecret, rawPublicKey } from "../src/venue/auth.js";
 import { MarketDataFeed } from "../src/venue/feed.js";
 import { PolymarketApiError, PolymarketRestClient } from "../src/venue/rest-client.js";
+import { rawWebSocketFactory } from "../src/venue/ws-client.js";
 import { FakePolymarketUS } from "./fake-polymarket-us.js";
 
 /**
@@ -132,7 +133,15 @@ describe("REST over a real socket", () => {
 });
 
 describe("market data over a real WebSocket", () => {
-	it("subscribes, receives snapshots and live pushes, and applies them to the store", async () => {
+	/** Signs each upgrade the way the venue's SDK does: over `GET /v1/ws/markets`, fresh timestamp. */
+	function signedFactory() {
+		const privateKey = privateKeyFromSecret(SECRET);
+		return rawWebSocketFactory({
+			headersProvider: () => createAuthHeaders(KEY_ID, privateKey, "GET", "/v1/ws/markets", Date.now()),
+		});
+	}
+
+	it("subscribes with a signed upgrade, receives snapshots and live pushes", async () => {
 		const { fake, baseUrl } = await boot();
 		const store = new BookStore();
 		const updates: TopOfBook[] = [];
@@ -141,6 +150,7 @@ describe("market data over a real WebSocket", () => {
 			slugs: ["yes-alpha", "yes-beta"],
 			staleTimeoutMs: 30_000,
 			recycleAfterMs: 0,
+			wsFactory: signedFactory(),
 			onUpdate: (book) => {
 				if (store.apply(book)) updates.push(book);
 			},
@@ -154,6 +164,27 @@ describe("market data over a real WebSocket", () => {
 			await waitFor("live push", () => decToString(store.get("yes-alpha")?.bid ?? (0n as never)) === "0.45");
 			expect(feed.stats().serverErrors).toBe(0);
 			expect(feed.stats().parseErrors).toBe(0);
+			expect(fake.wsUpgradesRejected).toBe(0);
+		} finally {
+			feed.stop();
+		}
+	});
+
+	it("refuses an unsigned upgrade: market data is authenticated on this venue", async () => {
+		const { fake, baseUrl } = await boot();
+		const feed = new MarketDataFeed({
+			wsBaseUrl: baseUrl.replace("http://", "ws://"),
+			slugs: ["yes-alpha"],
+			staleTimeoutMs: 30_000,
+			recycleAfterMs: 0,
+			// No headersProvider: the upgrade carries no signature, as the built-in WebSocket would.
+			wsFactory: rawWebSocketFactory(),
+			onUpdate: () => {},
+		});
+		feed.start();
+		try {
+			await waitFor("rejected upgrade", () => fake.wsUpgradesRejected >= 1);
+			expect(feed.stats().messages).toBe(0);
 		} finally {
 			feed.stop();
 		}
@@ -166,6 +197,7 @@ describe("market data over a real WebSocket", () => {
 			slugs: ["no-such-market"],
 			staleTimeoutMs: 30_000,
 			recycleAfterMs: 0,
+			wsFactory: signedFactory(),
 			onUpdate: () => {},
 		});
 		feed.start();
@@ -174,5 +206,39 @@ describe("market data over a real WebSocket", () => {
 		} finally {
 			feed.stop();
 		}
+	});
+});
+
+describe("order preview over a real socket", () => {
+	it("round-trips the request envelope and reports commission basis points", async () => {
+		const { fake, client } = await boot();
+		const order = await client.previewOrder({
+			marketSlug: "yes-alpha",
+			intent: "ORDER_INTENT_BUY_LONG",
+			type: "ORDER_TYPE_LIMIT",
+			price: { value: "0.01", currency: "USD" },
+			quantity: 5,
+			tif: "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL",
+		});
+		expect(order.commissionsBasisPoints).toBe("500");
+		expect(order.makerCommissionsBasisPoints).toBe("-125");
+		// Nothing was placed and nothing moved.
+		expect(fake.previews).toBe(1);
+		expect(fake.placements).toHaveLength(0);
+		expect(decToString(fake.balanceOf())).toBe("100");
+	});
+
+	it("refuses a preview that fails the venue's static order checks", async () => {
+		const { client } = await boot();
+		await expect(
+			client.previewOrder({
+				marketSlug: "yes-alpha",
+				intent: "ORDER_INTENT_BUY_LONG",
+				type: "ORDER_TYPE_LIMIT",
+				price: { value: "0.475", currency: "USD" },
+				quantity: 5,
+				tif: "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL",
+			}),
+		).rejects.toMatchObject({ httpStatus: 400 });
 	});
 });

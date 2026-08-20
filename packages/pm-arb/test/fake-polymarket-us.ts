@@ -29,9 +29,13 @@ import type { CreateOrderParams, EventDetail, MarketBook, OrderIntent } from "..
  * means the request would have been accepted by the venue - not merely that our client likes its
  * own output.
  *
- * Known gaps, chosen rather than accidental: no fee collection yet (fees arrive with the detection
- * core so they are modelled in ONE place), no rate-limit enforcement, whole unfragmented WS frames
- * only. Tests must not claim coverage of those.
+ * It also verifies the WebSocket upgrade signature whenever keys are registered, because the
+ * venue's SDK signs the upgrade request itself and has no anonymous connect path; and it serves
+ * `/v1/order/preview`, refusing a body that fails to wrap the order in the SDK's `request` field.
+ *
+ * Known gaps, chosen rather than accidental: no fee collection on fills (fees are modelled in ONE
+ * place, the detection core; preview echoes configured basis points only), no rate-limit
+ * enforcement, whole unfragmented WS frames only. Tests must not claim coverage of those.
  */
 
 export interface FakeMarketSpec {
@@ -54,6 +58,10 @@ export interface FakeOptions {
 	/** Minimum order quantity in shares. */
 	readonly minQuantity?: number;
 	readonly tick?: string;
+	/** Echoed in preview/order responses, as the venue reports them. Default "500" (a 0.05 rate). */
+	readonly commissionsBasisPoints?: string;
+	/** Maker rebates surface as negative basis points. Default "-125" (a 0.0125 rebate). */
+	readonly makerCommissionsBasisPoints?: string;
 }
 
 export interface RecordedOrder {
@@ -84,10 +92,14 @@ export class FakePolymarketUS {
 	private readonly minQuantity: number;
 	private readonly tick: Dec;
 	private nextOrderId = 9000;
+	private readonly commissionsBasisPoints: string;
+	private readonly makerCommissionsBasisPoints: string;
 
 	readonly placements: RecordedOrder[] = [];
 	readonly paths: string[] = [];
 	signatureFailures = 0;
+	wsUpgradesRejected = 0;
+	previews = 0;
 
 	constructor(options: FakeOptions) {
 		for (const market of options.markets) this.markets.set(market.slug, { ...market });
@@ -95,6 +107,8 @@ export class FakePolymarketUS {
 		this.timestampSkewMs = options.timestampSkewMs ?? 30_000;
 		this.minQuantity = options.minQuantity ?? 5;
 		this.tick = decFromString(options.tick ?? "0.01");
+		this.commissionsBasisPoints = options.commissionsBasisPoints ?? "500";
+		this.makerCommissionsBasisPoints = options.makerCommissionsBasisPoints ?? "-125";
 		for (const [keyId, raw] of Object.entries(options.keys ?? {})) this.registerKey(keyId, raw);
 	}
 
@@ -102,13 +116,20 @@ export class FakePolymarketUS {
 		this.keys.set(keyId, publicKeyFromRaw(rawPublicKey));
 	}
 
-	async start(): Promise<{ baseUrl: string }> {
+	/** Port 0 (the default) picks an ephemeral port; pass a fixed one for the standalone runner. */
+	async start(port = 0): Promise<{ baseUrl: string }> {
 		const server = createServer((req, res) => this.handleHttp(req, res));
 		server.on("upgrade", (req, socket) => this.handleUpgrade(req, socket as Duplex));
 		this.server = server;
-		await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-		const port = (server.address() as AddressInfo).port;
-		return { baseUrl: `http://127.0.0.1:${port}` };
+		await new Promise<void>((resolve, reject) => {
+			server.once("error", reject);
+			server.listen(port, "127.0.0.1", () => {
+				server.removeListener("error", reject);
+				resolve();
+			});
+		});
+		const bound = (server.address() as AddressInfo).port;
+		return { baseUrl: `http://127.0.0.1:${bound}` };
 	}
 
 	async stop(): Promise<void> {
@@ -168,6 +189,18 @@ export class FakePolymarketUS {
 		if (typeof key !== "string" || url.pathname !== "/v1/ws/markets") {
 			socket.end("HTTP/1.1 400 Bad Request\r\n\r\n");
 			return;
+		}
+		// The venue's SDK signs the upgrade request itself - there is no anonymous connect path in
+		// it at all - so when this fake has keys registered it demands the same signature, over
+		// `GET /v1/ws/markets`. Instances with no registered keys accept anonymous connections so
+		// pure market-data tests need no key material.
+		if (this.keys.size > 0) {
+			const problem = this.checkAuth(req, url.pathname);
+			if (problem) {
+				this.wsUpgradesRejected++;
+				socket.end(`HTTP/1.1 401 Unauthorized\r\ncontent-type: application/json\r\n\r\n{"message":"${problem}"}`);
+				return;
+			}
 		}
 		const accept = createHash("sha1")
 			.update(key + WS_GUID)
@@ -304,6 +337,10 @@ export class FakePolymarketUS {
 			this.placeOrder(res, body);
 			return;
 		}
+		if (method === "POST" && path === "/v1/order/preview") {
+			this.previewOrder(res, body);
+			return;
+		}
 		if (method === "GET" && path === "/v1/orders/open") {
 			this.ok(res, { orders: [] });
 			return;
@@ -322,25 +359,80 @@ export class FakePolymarketUS {
 	 * and fail only here (and live). This is the whole reason the fake verifies rather than trusts.
 	 */
 	private authorize(req: IncomingMessage, path: string, res: ServerResponse): boolean {
+		const problem = this.checkAuth(req, path);
+		if (problem) {
+			this.fail(res, 401, problem);
+			return false;
+		}
+		return true;
+	}
+
+	/** Returns the refusal message, or undefined when the request verifies. */
+	private checkAuth(req: IncomingMessage, path: string): string | undefined {
 		const keyId = String(req.headers["x-pm-access-key"] ?? "");
 		const timestamp = String(req.headers["x-pm-timestamp"] ?? "");
 		const signature = String(req.headers["x-pm-signature"] ?? "");
 		const publicKey = this.keys.get(keyId);
-		if (!publicKey) {
-			this.fail(res, 401, "unknown API key");
-			return false;
-		}
+		if (!publicKey) return "unknown API key";
 		const ts = Number(timestamp);
 		if (!Number.isFinite(ts) || Math.abs(Date.now() - ts) > this.timestampSkewMs) {
-			this.fail(res, 401, "timestamp outside allowed window");
-			return false;
+			return "timestamp outside allowed window";
 		}
 		if (!verifyAuthMessage(publicKey, timestamp, req.method ?? "GET", path, signature)) {
 			this.signatureFailures++;
-			this.fail(res, 401, "invalid signature");
-			return false;
+			return "invalid signature";
 		}
-		return true;
+		return undefined;
+	}
+
+	/**
+	 * Validates without placing. The SDK's PreviewOrderParams wraps the order in a `request` field
+	 * - a bare CreateOrderParams body is refused, because a client that sends the create shape here
+	 * would fail only against the real venue otherwise. Nothing mutates; the response carries the
+	 * commission fields doctor reconciles the configured fee rates against.
+	 */
+	private previewOrder(res: ServerResponse, body: string): void {
+		this.previews++;
+		let envelope: { request?: CreateOrderParams };
+		try {
+			envelope = JSON.parse(body) as { request?: CreateOrderParams };
+		} catch {
+			this.fail(res, 400, "body is not valid JSON");
+			return;
+		}
+		const params = envelope.request;
+		if (!params) {
+			this.fail(res, 400, "preview body must wrap the order in a request field");
+			return;
+		}
+		const problem = this.validateOrderParams(params);
+		if (problem) {
+			this.fail(res, 400, problem);
+			return;
+		}
+		this.ok(res, {
+			order: {
+				marketSlug: params.marketSlug,
+				intent: params.intent,
+				price: params.price,
+				quantity: params.quantity,
+				tif: params.tif,
+				commissionsBasisPoints: this.commissionsBasisPoints,
+				makerCommissionsBasisPoints: this.makerCommissionsBasisPoints,
+			},
+		});
+	}
+
+	/** The static order checks shared by create and preview. Returns the refusal, or undefined. */
+	private validateOrderParams(params: CreateOrderParams): string | undefined {
+		if (!this.markets.has(params.marketSlug)) return "market not found";
+		if (!Number.isInteger(params.quantity) || params.quantity < this.minQuantity) {
+			return `quantity must be an integer >= ${this.minQuantity}`;
+		}
+		const price = params.price ? decTryFromString(params.price.value) : undefined;
+		if (!price || !decIsPositive(price) || decGte(price, ONE)) return "price must be inside (0, 1)";
+		if (price % this.tick !== 0n) return "price is not a multiple of the tick";
+		return undefined;
 	}
 
 	private placeOrder(res: ServerResponse, body: string): void {
@@ -365,25 +457,16 @@ export class FakePolymarketUS {
 			});
 		};
 
-		if (!market) {
+		const problem = this.validateOrderParams(params);
+		if (problem || !market) {
 			record("ORDER_STATE_REJECTED", 0);
-			this.fail(res, 404, "market not found");
-			return;
-		}
-		if (!Number.isInteger(params.quantity) || params.quantity < this.minQuantity) {
-			record("ORDER_STATE_REJECTED", 0);
-			this.fail(res, 400, `quantity must be an integer >= ${this.minQuantity}`);
+			this.fail(res, problem === "market not found" ? 404 : 400, problem ?? "market not found");
 			return;
 		}
 		const price = params.price ? decTryFromString(params.price.value) : undefined;
-		if (!price || !decIsPositive(price) || decGte(price, ONE)) {
+		if (!price) {
 			record("ORDER_STATE_REJECTED", 0);
 			this.fail(res, 400, "price must be inside (0, 1)");
-			return;
-		}
-		if (price % this.tick !== 0n) {
-			record("ORDER_STATE_REJECTED", 0);
-			this.fail(res, 400, "price is not a multiple of the tick");
 			return;
 		}
 

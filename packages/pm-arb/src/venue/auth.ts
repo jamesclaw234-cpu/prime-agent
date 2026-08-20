@@ -62,11 +62,13 @@ export function rawPublicKey(privateKey: KeyObject): Buffer {
 	return Buffer.from(spki.subarray(spki.length - 32));
 }
 
-export interface AuthHeaders {
+// A type alias rather than an interface so it stays assignable to Record<string, string> - the
+// shape header-carrying transports (the raw WebSocket client, http.request) expect.
+export type AuthHeaders = {
 	readonly "X-PM-Access-Key": string;
 	readonly "X-PM-Timestamp": string;
 	readonly "X-PM-Signature": string;
-}
+};
 
 /**
  * Signs one request.
