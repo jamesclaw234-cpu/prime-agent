@@ -65,6 +65,8 @@ jobs:
             install_uv: false
           - name: btc-arb
             package: packages/btc-arb
+          - name: pm-arb
+            package: packages/pm-arb
             command: npm test
             install_uv: false
           - name: coding-agent 1/3

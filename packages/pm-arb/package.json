@@ -1,0 +1,45 @@
+{
+	"name": "@earendil-works/pi-pm-arb",
+	"version": "0.7.1",
+	"private": true,
+	"description": "Polymarket US prediction-market arbitrage scanner and execution engine, paper-trading by default",
+	"type": "module",
+	"main": "./dist/index.js",
+	"types": "./dist/index.d.ts",
+	"bin": {
+		"pi-pm-arb": "./dist/cli.js"
+	},
+	"files": [
+		"dist",
+		"README.md"
+	],
+	"scripts": {
+		"clean": "shx rm -rf dist",
+		"build": "tsgo -p tsconfig.build.json",
+		"dev": "tsgo -p tsconfig.build.json --watch --preserveWatchOutput",
+		"test": "vitest --run",
+		"start": "npx tsx src/cli.ts run"
+	},
+	"keywords": [
+		"polymarket",
+		"prediction-markets",
+		"arbitrage",
+		"trading",
+		"market-data"
+	],
+	"author": "Mario Zechner",
+	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/PrimeIntellect-ai/prime-agent.git",
+		"directory": "packages/pm-arb"
+	},
+	"engines": {
+		"node": ">=22.8.0"
+	},
+	"devDependencies": {
+		"@types/node": "^24.3.0",
+		"typescript": "^5.7.3",
+		"vitest": "^4.1.9"
+	}
+}
